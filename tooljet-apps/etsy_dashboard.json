@@ -174,9 +174,44 @@
       "data_source": "etsy_app_db",
       "kind": "postgresql",
       "options": {
-        "query": "SELECT id, name, etsy_shop_id, CASE WHEN oauth_token IS NOT NULL AND token_expires > now() THEN 'connected' WHEN oauth_token IS NOT NULL THEN 'expired' ELSE 'not_connected' END AS status, token_expires FROM shops ORDER BY id;"
+        "query": "SELECT id, name, etsy_shop_id, CASE WHEN oauth_token IS NOT NULL AND token_expires > now() THEN 'connected' WHEN oauth_token IS NOT NULL THEN 'expired' ELSE 'not_connected' END AS status, pod_provider, pod_shop_id, last_synced_at, token_expires FROM shops ORDER BY id;"
       },
       "run_on_page_load": true
+    },
+    {
+      "name": "list_orders",
+      "data_source": "etsy_app_db",
+      "kind": "postgresql",
+      "options": {
+        "query": "SELECT o.id, s.name AS shop, o.etsy_order_id, o.status, o.total, o.pod_provider, o.pod_order_id, o.error, o.created_at FROM orders o JOIN shops s ON s.id = o.shop_id ORDER BY o.created_at DESC LIMIT 200;"
+      },
+      "run_on_page_load": true
+    },
+    {
+      "name": "reroute_order",
+      "data_source": "n8n_api",
+      "kind": "restapi",
+      "options": {
+        "method": "post",
+        "url_path": "/webhook/pod-route",
+        "body_toggle": true,
+        "json_body": { "order_id": "{{components.ordersTable.selectedRow?.id}}" }
+      },
+      "run_on_page_load": false
+    },
+    {
+      "name": "save_shop_pod_config",
+      "data_source": "etsy_app_db",
+      "kind": "postgresql",
+      "options": {
+        "query": "UPDATE shops SET pod_provider = NULLIF($1::text, ''), pod_shop_id = NULLIF($2::text, '') WHERE id = $3 RETURNING id, pod_provider, pod_shop_id;",
+        "params": [
+          "{{components.shopPodProviderSelect.value}}",
+          "{{components.shopPodShopIdInput.value}}",
+          "{{components.shopsTable.selectedRow?.id}}"
+        ]
+      },
+      "run_on_page_load": false
     }
   ],
   "pages": [
@@ -307,9 +342,38 @@
               { "key": "name", "name": "Name" },
               { "key": "etsy_shop_id", "name": "Etsy shop id" },
               { "key": "status", "name": "Status" },
+              { "key": "pod_provider", "name": "POD" },
+              { "key": "pod_shop_id", "name": "POD shop id" },
+              { "key": "last_synced_at", "name": "Last sync" },
               { "key": "token_expires", "name": "Token expires" }
             ]
           }
+        },
+        { "id": "podConfigTitle", "type": "Text", "props": { "text": "POD provider for selected shop" } },
+        {
+          "id": "shopPodProviderSelect", "type": "Dropdown",
+          "props": {
+            "label": "Provider",
+            "values": ["", "printify", "printful"],
+            "labels": ["(none)", "Printify", "Printful"],
+            "default_value": "{{components.shopsTable.selectedRow?.pod_provider || ''}}"
+          }
+        },
+        {
+          "id": "shopPodShopIdInput", "type": "TextInput",
+          "props": {
+            "label": "POD shop / store id",
+            "placeholder": "Printify shop id, or Printful store id",
+            "default_value": "{{components.shopsTable.selectedRow?.pod_shop_id || ''}}"
+          }
+        },
+        {
+          "id": "savePodConfigBtn", "type": "Button",
+          "props": { "text": "Save POD config", "disabled": "{{!components.shopsTable.selectedRow}}" },
+          "events": [
+            { "event": "onClick", "action": "run-query", "query": "save_shop_pod_config" },
+            { "event": "onSuccess", "action": "run-query", "query": "list_shops_with_status" }
+          ]
         }
       ]
     },
@@ -399,7 +463,32 @@
       "id": "orders",
       "name": "Orders",
       "components": [
-        { "id": "ordersStub", "type": "Text", "props": { "text": "Orders tab — wired in v2 alongside workflows 06 (Etsy sync) and 07 (POD routing)." } }
+        { "id": "ordersTitle", "type": "Text", "props": { "text": "Synced Etsy orders + POD routing status" } },
+        {
+          "id": "ordersTable", "type": "Table",
+          "props": {
+            "data": "{{queries.list_orders.data}}",
+            "columns": [
+              { "key": "id", "name": "ID" },
+              { "key": "shop", "name": "Shop" },
+              { "key": "etsy_order_id", "name": "Etsy receipt" },
+              { "key": "status", "name": "Status" },
+              { "key": "total", "name": "Total" },
+              { "key": "pod_provider", "name": "POD" },
+              { "key": "pod_order_id", "name": "POD order id" },
+              { "key": "error", "name": "Error" },
+              { "key": "created_at", "name": "Created" }
+            ]
+          }
+        },
+        {
+          "id": "syncBtn", "type": "Button",
+          "props": { "text": "Re-route selected order via wf 07" },
+          "events": [
+            { "event": "onClick", "action": "run-query", "query": "reroute_order" },
+            { "event": "onSuccess", "action": "run-query", "query": "list_orders" }
+          ]
+        }
       ]
     },
     {

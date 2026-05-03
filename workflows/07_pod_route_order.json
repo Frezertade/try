@@ -1,5 +1,5 @@
 {
-  "name": "07 - POD Route Order (stub)",
+  "name": "07 - POD Route Order",
   "nodes": [
     {
       "parameters": {
@@ -17,33 +17,201 @@
     },
     {
       "parameters": {
-        "language": "javaScript",
-        "jsCode": "// TODO: based on body.pod_provider:\n//   printify  → POST https://api.printify.com/v1/shops/{shop_id}/orders.json\n//   printful  → POST https://api.printful.com/orders\n// Then UPDATE orders SET pod_order_id, status.\nreturn [{ json: { ok: false, todo: 'POD routing not implemented in v1', body: $input.first().json.body } }];"
+        "operation": "executeQuery",
+        "query": "SELECT o.id AS order_id, o.shop_id, o.etsy_order_id, o.status, o.total, o.raw, o.line_items, s.name AS shop_name, s.pod_provider, s.pod_shop_id FROM orders o JOIN shops s ON s.id = o.shop_id WHERE o.id = $1;",
+        "options": {
+          "queryReplacement": "={{ ($json.body || $json).order_id }}"
+        }
       },
-      "id": "wf07-todo",
-      "name": "TODO",
+      "id": "wf07-pg-order",
+      "name": "Fetch Order",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [460, 300],
+      "credentials": {
+        "postgres": {
+          "id": "pg-etsy-app",
+          "name": "Postgres etsy_app"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "// Pull product/POD metadata for every Etsy listing referenced in the order's\n// line items. Skips early if the order is empty or already routed.\nconst row = $input.first().json;\nif (!row) throw new Error('Order not found');\n\nconst transactions = Array.isArray(row.line_items) ? row.line_items : [];\nconst etsyListingIds = [...new Set(transactions.map(t => String(t.listing_id)).filter(Boolean))];\n\nreturn [{ json: { ...row, transactions, etsyListingIds } }];"
+      },
+      "id": "wf07-prep",
+      "name": "Prep",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [460, 300]
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT l.etsy_listing_id, p.kind, p.pod_metadata FROM listings l JOIN products p ON p.id = l.product_id WHERE l.etsy_listing_id = ANY($1::text[]);",
+        "options": {
+          "queryReplacement": "={{ JSON.stringify($json.etsyListingIds) }}"
+        }
+      },
+      "id": "wf07-pg-products",
+      "name": "Fetch Product Mapping",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [900, 300],
+      "credentials": {
+        "postgres": {
+          "id": "pg-etsy-app",
+          "name": "Postgres etsy_app"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "// Decide whether this order needs POD routing, and if so, build the\n// provider-specific payload. Soft-exits with status='skipped' when the\n// order has no POD line items, the shop has no provider configured, or any\n// product is missing pod_metadata.\nconst order = $('Prep').first().json;\nconst mappingRows = $input.all().map(i => i.json);\nconst byListing = Object.fromEntries(mappingRows.map(r => [String(r.etsy_listing_id), r]));\n\nconst podLines = order.transactions.filter(t => byListing[String(t.listing_id)]?.kind === 'pod');\nif (!podLines.length) {\n  return [{ json: { _action: 'noop', order_id: order.order_id, reason: 'no POD line items' } }];\n}\nif (!order.pod_provider || !order.pod_shop_id) {\n  return [{ json: { _action: 'pending', order_id: order.order_id, reason: 'shop has no pod_provider/pod_shop_id configured' } }];\n}\nconst missingMeta = podLines.filter(t => !byListing[String(t.listing_id)]?.pod_metadata);\nif (missingMeta.length) {\n  return [{ json: { _action: 'pending', order_id: order.order_id, reason: `pod_metadata missing for listings ${missingMeta.map(t => t.listing_id).join(',')}` } }];\n}\n\n// Address from the Etsy receipt.\nconst r = order.raw || {};\nconst address = {\n  first_name: r.name?.split(' ')?.[0] || r.first_line || 'Customer',\n  last_name:  r.name?.split(' ').slice(1).join(' ') || '',\n  email:      r.buyer_email || r.email || null,\n  phone:      r.buyer_phone || '',\n  country:    r.country_iso || r.country_name || 'US',\n  region:     r.state || '',\n  address1:   r.first_line || '',\n  address2:   r.second_line || '',\n  city:       r.city || '',\n  zip:        r.zip || ''\n};\n\nlet url, headers, body;\nif (order.pod_provider === 'printify') {\n  const apiKey = process.env.PRINTIFY_API_KEY;\n  if (!apiKey) return [{ json: { _action: 'pending', order_id: order.order_id, reason: 'PRINTIFY_API_KEY not set' } }];\n  url = `https://api.printify.com/v1/shops/${order.pod_shop_id}/orders.json`;\n  headers = { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' };\n  body = {\n    external_id: `etsy-${order.etsy_order_id}`,\n    label: order.shop_name,\n    line_items: podLines.map(t => {\n      const meta = byListing[String(t.listing_id)].pod_metadata;\n      return { product_id: meta.product_id, variant_id: meta.variant_id, quantity: t.quantity || 1 };\n    }),\n    shipping_method: 1,\n    send_shipping_notification: false,\n    address_to: address\n  };\n} else if (order.pod_provider === 'printful') {\n  const apiKey = process.env.PRINTFUL_API_KEY;\n  if (!apiKey) return [{ json: { _action: 'pending', order_id: order.order_id, reason: 'PRINTFUL_API_KEY not set' } }];\n  url = 'https://api.printful.com/orders';\n  headers = { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json', 'X-PF-Store-Id': String(order.pod_shop_id) };\n  body = {\n    external_id: `etsy-${order.etsy_order_id}`,\n    recipient: {\n      name:    [address.first_name, address.last_name].filter(Boolean).join(' '),\n      address1: address.address1,\n      address2: address.address2,\n      city:    address.city,\n      state_code: address.region,\n      country_code: address.country,\n      zip:     address.zip,\n      phone:   address.phone,\n      email:   address.email\n    },\n    items: podLines.map(t => {\n      const meta = byListing[String(t.listing_id)].pod_metadata;\n      return { variant_id: meta.variant_id, quantity: t.quantity || 1, files: meta.files || [] };\n    })\n  };\n} else {\n  return [{ json: { _action: 'pending', order_id: order.order_id, reason: `unsupported pod_provider '${order.pod_provider}'` } }];\n}\n\nreturn [{ json: { _action: 'send', order_id: order.order_id, provider: order.pod_provider, url, headers, body } }];"
+      },
+      "id": "wf07-decide",
+      "name": "Build Provider Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1120, 300]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            { "conditions": { "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" }, "combinator": "and",
+              "conditions": [{ "leftValue": "={{ $json._action }}", "rightValue": "send", "operator": { "type": "string", "operation": "equals" } }] },
+              "renameOutput": true, "outputKey": "send" },
+            { "conditions": { "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" }, "combinator": "and",
+              "conditions": [{ "leftValue": "={{ $json._action }}", "rightValue": "pending", "operator": { "type": "string", "operation": "equals" } }] },
+              "renameOutput": true, "outputKey": "pending" },
+            { "conditions": { "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" }, "combinator": "and",
+              "conditions": [{ "leftValue": "={{ $json._action }}", "rightValue": "noop", "operator": { "type": "string", "operation": "equals" } }] },
+              "renameOutput": true, "outputKey": "noop" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "wf07-switch",
+      "name": "Action",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [1340, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.url }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization",  "value": "={{ $json.headers.Authorization }}" },
+            { "name": "Content-Type",   "value": "application/json" },
+            { "name": "X-PF-Store-Id",  "value": "={{ $json.headers['X-PF-Store-Id'] || '' }}" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.body) }}",
+        "options": {
+          "timeout": 60000,
+          "response": { "response": { "neverError": true, "responseFormat": "json" } }
+        }
+      },
+      "id": "wf07-send",
+      "name": "Send to Provider",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1560, 200]
+    },
+    {
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "// Normalise the provider response.\nconst sent = $('Build Provider Payload').first().json;\nconst res  = $input.first().json;\nconst providerOrderId = res.id || res.result?.id || res.order_id || null;\nconst error = providerOrderId ? null : (res.error || res.errors || JSON.stringify(res).slice(0, 500));\nreturn [{ json: {\n  order_id: sent.order_id,\n  provider: sent.provider,\n  pod_order_id: providerOrderId ? String(providerOrderId) : null,\n  status: providerOrderId ? 'pod_routed' : 'pod_failed',\n  error\n} }];"
+      },
+      "id": "wf07-parse",
+      "name": "Parse Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1780, 200]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE orders SET pod_provider = $1, pod_order_id = $2, status = $3, error = $4 WHERE id = $5 RETURNING id, pod_provider, pod_order_id, status, error;",
+        "options": {
+          "queryReplacement": "={{ $json.provider }},={{ $json.pod_order_id }},={{ $json.status }},={{ $json.error }},={{ $json.order_id }}"
+        }
+      },
+      "id": "wf07-pg-update-send",
+      "name": "Update Order (sent)",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [2000, 200],
+      "credentials": {
+        "postgres": {
+          "id": "pg-etsy-app",
+          "name": "Postgres etsy_app"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE orders SET status = 'pod_pending', error = $1 WHERE id = $2 RETURNING id, status, error;",
+        "options": {
+          "queryReplacement": "={{ $json.reason }},={{ $json.order_id }}"
+        }
+      },
+      "id": "wf07-pg-update-pending",
+      "name": "Update Order (pending)",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1560, 350],
+      "credentials": {
+        "postgres": {
+          "id": "pg-etsy-app",
+          "name": "Postgres etsy_app"
+        }
+      }
     },
     {
       "parameters": {
         "respondWith": "json",
-        "responseBody": "={{ $json }}"
+        "responseBody": "={{ { ok: true, result: $json } }}"
       },
       "id": "wf07-respond",
       "name": "Respond",
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1,
-      "position": [680, 300]
+      "position": [2220, 300]
     }
   ],
   "connections": {
-    "Webhook": { "main": [[{ "node": "TODO", "type": "main", "index": 0 }]] },
-    "TODO": { "main": [[{ "node": "Respond", "type": "main", "index": 0 }]] }
+    "Webhook":              { "main": [[{ "node": "Fetch Order",            "type": "main", "index": 0 }]] },
+    "Fetch Order":          { "main": [[{ "node": "Prep",                   "type": "main", "index": 0 }]] },
+    "Prep":                 { "main": [[{ "node": "Fetch Product Mapping",  "type": "main", "index": 0 }]] },
+    "Fetch Product Mapping":{ "main": [[{ "node": "Build Provider Payload","type": "main", "index": 0 }]] },
+    "Build Provider Payload": { "main": [[{ "node": "Action",               "type": "main", "index": 0 }]] },
+    "Action":               { "main": [
+                                [{ "node": "Send to Provider",      "type": "main", "index": 0 }],
+                                [{ "node": "Update Order (pending)","type": "main", "index": 0 }],
+                                [{ "node": "Respond",               "type": "main", "index": 0 }]
+                              ] },
+    "Send to Provider":     { "main": [[{ "node": "Parse Response",         "type": "main", "index": 0 }]] },
+    "Parse Response":       { "main": [[{ "node": "Update Order (sent)",    "type": "main", "index": 0 }]] },
+    "Update Order (sent)":  { "main": [[{ "node": "Respond",                "type": "main", "index": 0 }]] },
+    "Update Order (pending)": { "main": [[{ "node": "Respond",              "type": "main", "index": 0 }]] }
   },
   "active": false,
-  "settings": { "executionOrder": "v1" },
-  "tags": [{ "name": "pod" }, { "name": "stub" }],
-  "meta": { "description": "Stub. Routes an order to Printify or Printful API." }
+  "settings": {
+    "executionOrder": "v1",
+    "saveExecutionProgress": true,
+    "saveManualExecutions": true,
+    "saveDataErrorExecution": "all"
+  },
+  "tags": [{ "name": "pod" }, { "name": "orders" }],
+  "meta": { "description": "POST /webhook/pod-route {order_id}. Joins line items with products.pod_metadata, builds Printify or Printful create-order payload, POSTs it, records pod_order_id+status. Soft-fails to status='pod_pending' when shop has no provider, products lack pod_metadata, or API key is unset — the order row records the reason for human follow-up." }
 }

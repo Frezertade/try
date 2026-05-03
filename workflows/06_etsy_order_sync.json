@@ -1,5 +1,5 @@
 {
-  "name": "06 - Etsy Order Sync (stub)",
+  "name": "06 - Etsy Order Sync",
   "nodes": [
     {
       "parameters": {
@@ -15,21 +15,125 @@
     },
     {
       "parameters": {
-        "language": "javaScript",
-        "jsCode": "// TODO: for each shop in shops, refresh token, then\n// GET https://openapi.etsy.com/v3/application/shops/{shop_id}/receipts?was_paid=true\n// since last sync (track watermark). UPSERT into orders. If product is POD,\n// hand off to workflow 07 via webhook.\nreturn [{ json: { ok: false, todo: 'Order sync not implemented in v1' } }];"
+        "operation": "executeQuery",
+        "query": "SELECT id, name, etsy_shop_id, oauth_token, refresh_token, token_expires, COALESCE(last_synced_at, created_at) AS watermark FROM shops WHERE oauth_token IS NOT NULL AND etsy_shop_id IS NOT NULL;"
       },
-      "id": "wf06-todo",
-      "name": "TODO",
+      "id": "wf06-pg-shops",
+      "name": "Active Shops",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [460, 300],
+      "credentials": {
+        "postgres": {
+          "id": "pg-etsy-app",
+          "name": "Postgres etsy_app"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "// For each connected shop: refresh the access token if it expires within\n// the next 60s, then fetch receipts paid since the watermark. Emit one\n// 'receipt' item per new receipt and one 'watermark' item per shop so the\n// downstream Switch can route them to different DB writes.\nconst out = [];\nconst clientId = process.env.ETSY_CLIENT_ID;\nif (!clientId) throw new Error('ETSY_CLIENT_ID not set');\n\nfor (const item of $input.all()) {\n  const shop = item.json;\n  let access  = shop.oauth_token;\n  let refresh = shop.refresh_token;\n  let expires = shop.token_expires;\n\n  const expMs = expires ? new Date(expires).getTime() : 0;\n  if (expMs - Date.now() < 60_000) {\n    const tok = await this.helpers.httpRequest({\n      method: 'POST',\n      url: 'https://api.etsy.com/v3/public/oauth/token',\n      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },\n      body: new URLSearchParams({\n        grant_type: 'refresh_token', client_id: clientId, refresh_token: refresh\n      }).toString(),\n      json: true,\n      timeout: 30000\n    });\n    if (!tok.access_token) {\n      out.push({ json: { _kind: 'error', shop_pk: shop.id, error: `refresh failed: ${JSON.stringify(tok)}` } });\n      continue;\n    }\n    access  = tok.access_token;\n    refresh = tok.refresh_token;\n    expires = new Date(Date.now() + (tok.expires_in - 60) * 1000).toISOString();\n  }\n\n  // Etsy receipts API: filter by min_created (unix seconds) for the watermark.\n  const watermarkSec = Math.floor(new Date(shop.watermark).getTime() / 1000);\n  let offset = 0;\n  const limit = 50;\n  let received = 0;\n  while (true) {\n    const res = await this.helpers.httpRequest({\n      method: 'GET',\n      url: `https://openapi.etsy.com/v3/application/shops/${shop.etsy_shop_id}/receipts`,\n      headers: { Authorization: `Bearer ${access}`, 'x-api-key': clientId },\n      qs: { limit, offset, was_paid: true, min_created: watermarkSec },\n      json: true,\n      timeout: 30000\n    });\n    const results = res.results || [];\n    for (const r of results) {\n      const total = (r.grandtotal && r.grandtotal.amount && r.grandtotal.divisor)\n        ? r.grandtotal.amount / r.grandtotal.divisor\n        : null;\n      out.push({ json: {\n        _kind: 'receipt',\n        shop_pk: shop.id,\n        etsy_order_id: String(r.receipt_id),\n        status: r.status || (r.is_paid ? 'paid' : 'unknown'),\n        total,\n        line_items: r.transactions || [],\n        raw: r\n      } });\n      received++;\n    }\n    if (results.length < limit) break;\n    offset += limit;\n    if (offset > 500) break; // safety\n  }\n\n  out.push({ json: {\n    _kind: 'watermark',\n    shop_pk: shop.id,\n    oauth_token: access,\n    refresh_token: refresh,\n    token_expires: expires,\n    received\n  } });\n}\n\nreturn out;"
+      },
+      "id": "wf06-fetch",
+      "name": "Refresh + Fetch",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [460, 300]
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            { "conditions": { "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" }, "combinator": "and",
+              "conditions": [{ "leftValue": "={{ $json._kind }}", "rightValue": "receipt", "operator": { "type": "string", "operation": "equals" } }] },
+              "renameOutput": true, "outputKey": "receipt" },
+            { "conditions": { "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" }, "combinator": "and",
+              "conditions": [{ "leftValue": "={{ $json._kind }}", "rightValue": "watermark", "operator": { "type": "string", "operation": "equals" } }] },
+              "renameOutput": true, "outputKey": "watermark" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "wf06-switch",
+      "name": "Route by Kind",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [900, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO orders (shop_id, etsy_order_id, status, total, raw, line_items) VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb) ON CONFLICT (etsy_order_id) DO NOTHING RETURNING id, shop_id, etsy_order_id;",
+        "options": {
+          "queryReplacement": "={{ $json.shop_pk }},={{ $json.etsy_order_id }},={{ $json.status }},={{ $json.total }},={{ JSON.stringify($json.raw) }},={{ JSON.stringify($json.line_items) }}"
+        }
+      },
+      "id": "wf06-pg-order",
+      "name": "Insert Order",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1120, 200],
+      "credentials": {
+        "postgres": {
+          "id": "pg-etsy-app",
+          "name": "Postgres etsy_app"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://localhost:5678/webhook/pod-route",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"order_id\": {{ $json.id }} }",
+        "options": { "timeout": 60000, "neverError": true }
+      },
+      "id": "wf06-route",
+      "name": "Dispatch POD",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1340, 200]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE shops SET oauth_token = $1, refresh_token = $2, token_expires = $3, last_synced_at = now() WHERE id = $4;",
+        "options": {
+          "queryReplacement": "={{ $json.oauth_token }},={{ $json.refresh_token }},={{ $json.token_expires }},={{ $json.shop_pk }}"
+        }
+      },
+      "id": "wf06-pg-shop-update",
+      "name": "Update Shop Watermark",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1120, 400],
+      "credentials": {
+        "postgres": {
+          "id": "pg-etsy-app",
+          "name": "Postgres etsy_app"
+        }
+      }
     }
   ],
   "connections": {
-    "Every 15 min": { "main": [[{ "node": "TODO", "type": "main", "index": 0 }]] }
+    "Every 15 min":   { "main": [[{ "node": "Active Shops",         "type": "main", "index": 0 }]] },
+    "Active Shops":   { "main": [[{ "node": "Refresh + Fetch",      "type": "main", "index": 0 }]] },
+    "Refresh + Fetch":{ "main": [[{ "node": "Route by Kind",        "type": "main", "index": 0 }]] },
+    "Route by Kind":  { "main": [
+                          [{ "node": "Insert Order",          "type": "main", "index": 0 }],
+                          [{ "node": "Update Shop Watermark", "type": "main", "index": 0 }]
+                        ] },
+    "Insert Order":   { "main": [[{ "node": "Dispatch POD",         "type": "main", "index": 0 }]] }
   },
   "active": false,
-  "settings": { "executionOrder": "v1" },
-  "tags": [{ "name": "etsy" }, { "name": "stub" }],
-  "meta": { "description": "Stub. Cron-driven order sync from Etsy v3 receipts API." }
+  "settings": {
+    "executionOrder": "v1",
+    "saveExecutionProgress": true,
+    "saveManualExecutions": true,
+    "saveDataErrorExecution": "all"
+  },
+  "tags": [{ "name": "etsy" }, { "name": "orders" }],
+  "meta": { "description": "Cron (15 min). For each connected shop: refresh-if-needed, fetch paid receipts since shops.last_synced_at, INSERT new orders (ON CONFLICT DO NOTHING), dispatch each new order to wf 07 (POD routing) — wf 07 no-ops on non-POD orders. Persists token rotation + watermark per shop." }
 }

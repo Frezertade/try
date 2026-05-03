@@ -228,6 +228,64 @@ you trust the AI outputs.
 
 ---
 
+## Order sync + POD routing (workflows 06, 07)
+
+### 1. Apply the migration (existing installs)
+```bash
+docker compose exec -T postgres psql -U "$POSTGRES_USER" -d etsy_app \
+  < db/migrations/2026-05-03_orders_pod.sql
+```
+Adds `shops.last_synced_at`, `shops.pod_provider`, `shops.pod_shop_id`,
+`products.pod_metadata`, `orders.line_items`, `orders.error`.
+
+### 2. Activate the workflows
+- `06 - Etsy Order Sync` — cron, 15-min interval. For each connected shop:
+  refreshes the token if it's near expiry, fetches paid receipts since
+  `shops.last_synced_at`, inserts new rows into `orders` (ON CONFLICT DO
+  NOTHING), then POSTs each new order to wf 07 via webhook. Idempotent.
+- `07 - POD Route Order` — `POST /webhook/pod-route {order_id}`. Joins line
+  items with `products.pod_metadata`, builds the Printify or Printful
+  create-order payload, dispatches it, and records `pod_provider` +
+  `pod_order_id` + `status='pod_routed'`. Soft-fails to `status='pod_pending'`
+  with the reason in `orders.error` if:
+  - the shop has no `pod_provider` / `pod_shop_id` set,
+  - any POD line item's `products.pod_metadata` is missing,
+  - the relevant `PRINTIFY_API_KEY` / `PRINTFUL_API_KEY` is unset.
+
+### 3. Configure POD on each shop
+Open the ToolJet **Shops** tab, select a shop, set the provider + provider
+store id, save. Or directly:
+```sql
+UPDATE shops SET pod_provider = 'printify', pod_shop_id = '12345' WHERE id = 1;
+```
+
+### 4. Map products to provider catalogues
+Each POD product needs `pod_metadata` populated with the provider's product
+ids. For example, for Printify:
+```sql
+UPDATE products SET pod_metadata = jsonb_build_object(
+  'product_id', 'pf_product_abc',
+  'variant_id', 4011
+) WHERE id = 5;
+```
+Until that's set, orders for the product land in `status='pod_pending'` —
+useful as a worklist surfaced in the **Orders** tab.
+
+### 5. Smoke test
+```bash
+# Force-trigger the cron
+curl -X POST http://localhost:5678/rest/workflows/06/run \
+  -u "$N8N_BASIC_AUTH_USER:$N8N_BASIC_AUTH_PASSWORD"
+# Or just wait 15 minutes after a real Etsy purchase; orders rows appear.
+
+# Manual POD reroute for a stuck order
+curl -X POST http://localhost:5678/webhook/pod-route \
+  -H 'content-type: application/json' \
+  -d '{"order_id": 1}'
+```
+
+---
+
 ## ComfyUI models
 
 ComfyUI ships without checkpoints. Drop weights into `comfyui/models/checkpoints/`:
@@ -311,8 +369,8 @@ ngrok http 5678   # n8n webhooks (use this URL as ETSY_REDIRECT_URI)
 | 3 | AI Ads Studio              | ✅ wired  | Pinterest/X/Instagram copy via Ollama + optional visual |
 | 4 | Etsy Connect + OAuth (04a, 04) | ✅ wired | PKCE flow; shops auto-upserted on callback |
 | 5 | Etsy Listing Publish       | ✅ wired  | Token refresh + createDraftListing in `state=draft` |
-| 6 | Etsy Order Sync (cron)     | 🟡 stub   | Pull receipts every 15 min, route POD orders to wf 7 |
-| 7 | POD Route Order            | 🟡 stub   | Branch on `pod_provider`, call Printify or Printful |
+| 6 | Etsy Order Sync (cron)     | ✅ wired  | 15-min cron, watermarked, refreshes tokens, dispatches POD |
+| 7 | POD Route Order            | ✅ wired  | Printify + Printful; soft-fails to `status=pod_pending` if metadata missing |
 | 8 | Promotion Scheduler (cron) | 🟡 stub   | Dispatch due `scheduled_posts` |
 
 ToolJet tabs **Dashboard / Orders / Analytics** depend on workflow 6 emitting
