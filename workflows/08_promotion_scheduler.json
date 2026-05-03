@@ -1,0 +1,35 @@
+{
+  "name": "08 - Promotion Scheduler (stub)",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "minutes", "minutesInterval": 5 }]
+        }
+      },
+      "id": "wf08-cron",
+      "name": "Every 5 min",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "// TODO: SELECT * FROM scheduled_posts WHERE status='queued' AND scheduled_for<=now()\n// For each: post to channel API (or write to a CSV export for manual posting),\n// then UPDATE scheduled_posts SET status='posted'.\nreturn [{ json: { ok: false, todo: 'Promotion scheduler not implemented in v1' } }];"
+      },
+      "id": "wf08-todo",
+      "name": "TODO",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, 300]
+    }
+  ],
+  "connections": {
+    "Every 5 min": { "main": [[{ "node": "TODO", "type": "main", "index": 0 }]] }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "promo" }, { "name": "stub" }],
+  "meta": { "description": "Stub. Polls scheduled_posts and dispatches due ones." }
+}

@@ -1,0 +1,140 @@
+{
+  "name": "01 - AI Listing Generator",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "listing-generate",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "wf01-webhook",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 300],
+      "webhookId": "listing-generate"
+    },
+    {
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "// Build a strict-JSON prompt for the local LLM.\n// Etsy SEO rules baked in: title <= 140 chars, exactly 13 tags, each tag <= 20 chars.\nconst { shop_id, niche, kind = 'printable', cost = 0 } = $input.first().json.body || $input.first().json;\n\nif (!shop_id || !niche) {\n  throw new Error('shop_id and niche are required');\n}\n\nconst system = `You are an Etsy SEO expert. Output ONLY valid minified JSON matching this schema:\n{\"title\": string (<=140 chars, keyword-rich, no ALL CAPS),\n \"tags\": string[13] (each <=20 chars, lowercase, multi-word allowed, no duplicates),\n \"description\": string (3 short paragraphs: hook, features, usage),\n \"suggested_price\": number (USD, reflects ${kind === 'printable' ? 'high-margin digital' : 'POD with cost basis'} pricing)}\nCost basis (USD): ${cost}.`;\n\nconst user = `Niche / product description: ${niche}\\nProduct kind: ${kind}`;\n\nreturn [{ json: { shop_id, niche, kind, cost, prompt: `${system}\\n\\n${user}` } }];"
+      },
+      "id": "wf01-build-prompt",
+      "name": "Build Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://ollama:11434/api/generate",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"mistral:7b-instruct-q4_K_M\",\n  \"prompt\": {{ JSON.stringify($json.prompt) }},\n  \"format\": \"json\",\n  \"stream\": false,\n  \"options\": { \"temperature\": 0.7 }\n}",
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "id": "wf01-ollama",
+      "name": "Call Ollama",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "// Parse + validate the LLM response.\nconst ollama = $input.first().json;\nconst input = $('Build Prompt').first().json;\n\nlet parsed;\ntry {\n  parsed = typeof ollama.response === 'string' ? JSON.parse(ollama.response) : ollama.response;\n} catch (e) {\n  throw new Error(`LLM returned non-JSON: ${e.message}`);\n}\n\nconst { title, tags, description, suggested_price } = parsed;\nif (!title || typeof title !== 'string' || title.length > 140) {\n  throw new Error('Invalid title');\n}\nif (!Array.isArray(tags) || tags.length !== 13) {\n  throw new Error(`Expected 13 tags, got ${Array.isArray(tags) ? tags.length : 'none'}`);\n}\nif (tags.some(t => typeof t !== 'string' || t.length > 20)) {\n  throw new Error('Tag too long (max 20 chars each)');\n}\nif (!description || typeof description !== 'string') {\n  throw new Error('Invalid description');\n}\nconst price = Number(suggested_price);\nif (!Number.isFinite(price) || price <= 0) {\n  throw new Error('Invalid suggested_price');\n}\n\nreturn [{\n  json: {\n    shop_id: input.shop_id,\n    niche: input.niche,\n    kind: input.kind,\n    cost: input.cost,\n    title,\n    tags,\n    description,\n    suggested_price: price,\n    ai_raw: parsed\n  }\n}];"
+      },
+      "id": "wf01-validate",
+      "name": "Validate",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [900, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO products (shop_id, kind, niche, cost) VALUES ($1, $2, $3, $4) RETURNING id;",
+        "options": {
+          "queryReplacement": "={{ $json.shop_id }},={{ $json.kind }},={{ $json.niche }},={{ $json.cost }}"
+        }
+      },
+      "id": "wf01-pg-product",
+      "name": "Insert Product",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1120, 300],
+      "credentials": {
+        "postgres": {
+          "id": "pg-etsy-app",
+          "name": "Postgres etsy_app"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO listings (product_id, title, description, tags, price, status, ai_raw) VALUES ($1, $2, $3, $4, $5, 'draft', $6::jsonb) RETURNING *;",
+        "options": {
+          "queryReplacement": "={{ $json.id }},={{ $('Validate').item.json.title }},={{ $('Validate').item.json.description }},={{ $('Validate').item.json.tags }},={{ $('Validate').item.json.suggested_price }},={{ JSON.stringify($('Validate').item.json.ai_raw) }}"
+        }
+      },
+      "id": "wf01-pg-listing",
+      "name": "Insert Listing",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1340, 300],
+      "credentials": {
+        "postgres": {
+          "id": "pg-etsy-app",
+          "name": "Postgres etsy_app"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { ok: true, listing: $json } }}"
+      },
+      "id": "wf01-respond",
+      "name": "Respond",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1560, 300]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [[{ "node": "Build Prompt", "type": "main", "index": 0 }]]
+    },
+    "Build Prompt": {
+      "main": [[{ "node": "Call Ollama", "type": "main", "index": 0 }]]
+    },
+    "Call Ollama": {
+      "main": [[{ "node": "Validate", "type": "main", "index": 0 }]]
+    },
+    "Validate": {
+      "main": [[{ "node": "Insert Product", "type": "main", "index": 0 }]]
+    },
+    "Insert Product": {
+      "main": [[{ "node": "Insert Listing", "type": "main", "index": 0 }]]
+    },
+    "Insert Listing": {
+      "main": [[{ "node": "Respond", "type": "main", "index": 0 }]]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveExecutionProgress": true,
+    "saveManualExecutions": true,
+    "saveDataErrorExecution": "all"
+  },
+  "tags": [{ "name": "ai" }, { "name": "listings" }],
+  "meta": {
+    "description": "Webhook → Ollama (Mistral) → validate → insert product + listing draft → respond. Configure the 'Postgres etsy_app' credential in n8n to point at the etsy_app database."
+  }
+}

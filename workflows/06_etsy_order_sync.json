@@ -1,0 +1,35 @@
+{
+  "name": "06 - Etsy Order Sync (stub)",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "minutes", "minutesInterval": 15 }]
+        }
+      },
+      "id": "wf06-cron",
+      "name": "Every 15 min",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "// TODO: for each shop in shops, refresh token, then\n// GET https://openapi.etsy.com/v3/application/shops/{shop_id}/receipts?was_paid=true\n// since last sync (track watermark). UPSERT into orders. If product is POD,\n// hand off to workflow 07 via webhook.\nreturn [{ json: { ok: false, todo: 'Order sync not implemented in v1' } }];"
+      },
+      "id": "wf06-todo",
+      "name": "TODO",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, 300]
+    }
+  ],
+  "connections": {
+    "Every 15 min": { "main": [[{ "node": "TODO", "type": "main", "index": 0 }]] }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "etsy" }, { "name": "stub" }],
+  "meta": { "description": "Stub. Cron-driven order sync from Etsy v3 receipts API." }
+}

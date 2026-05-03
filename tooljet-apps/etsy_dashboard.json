@@ -1,0 +1,184 @@
+{
+  "$schema": "https://docs.tooljet.com/schemas/app-export.v2.json",
+  "_note": "ToolJet's exported app JSON is large and version-coupled. This file is a build spec: a stable description of the app's pages, components, queries, and constants. After installing ToolJet CE, create the app manually using the spec below (or use ToolJet's Import App with a real export from your instance once one tab is built). All component IDs are advisory.",
+  "app": {
+    "name": "Etsy AI Self-Hosted Dashboard",
+    "slug": "etsy-ai-dashboard",
+    "isPublic": false
+  },
+  "workspace_constants": [
+    {
+      "name": "N8N_URL",
+      "value": "http://n8n:5678",
+      "scope": "global",
+      "_note": "Override per-environment. Use the Docker service name when ToolJet calls n8n inside the compose network."
+    },
+    {
+      "name": "DEFAULT_SHOP_ID",
+      "value": "1",
+      "scope": "global"
+    }
+  ],
+  "data_sources": [
+    {
+      "name": "etsy_app_db",
+      "kind": "postgresql",
+      "options": {
+        "host": "postgres",
+        "port": 5432,
+        "database": "etsy_app",
+        "username": "${POSTGRES_USER}",
+        "password": "${POSTGRES_PASSWORD}",
+        "ssl_enabled": false
+      }
+    },
+    {
+      "name": "n8n_api",
+      "kind": "restapi",
+      "options": {
+        "base_url": "{{constants.N8N_URL}}",
+        "headers": [{ "key": "Content-Type", "value": "application/json" }]
+      }
+    }
+  ],
+  "queries": [
+    {
+      "name": "list_shops",
+      "data_source": "etsy_app_db",
+      "kind": "postgresql",
+      "options": { "query": "SELECT id, name FROM shops ORDER BY id;" },
+      "run_on_page_load": true
+    },
+    {
+      "name": "list_listings",
+      "data_source": "etsy_app_db",
+      "kind": "postgresql",
+      "options": {
+        "query": "SELECT l.id, l.title, l.price, l.status, l.created_at, p.niche, p.kind, s.name AS shop FROM listings l JOIN products p ON p.id=l.product_id JOIN shops s ON s.id=p.shop_id ORDER BY l.created_at DESC LIMIT 100;"
+      },
+      "run_on_page_load": true
+    },
+    {
+      "name": "kpi_today",
+      "data_source": "etsy_app_db",
+      "kind": "postgresql",
+      "options": {
+        "query": "SELECT COALESCE(SUM(revenue),0) AS revenue, COALESCE(SUM(orders),0) AS orders, COALESCE(SUM(profit),0) AS profit FROM analytics_daily WHERE day = CURRENT_DATE;"
+      },
+      "run_on_page_load": true
+    },
+    {
+      "name": "generate_listing",
+      "data_source": "n8n_api",
+      "kind": "restapi",
+      "options": {
+        "method": "post",
+        "url_path": "/webhook/listing-generate",
+        "body_toggle": true,
+        "json_body": {
+          "shop_id": "{{components.shopSelect.value}}",
+          "niche": "{{components.nicheInput.value}}",
+          "kind": "{{components.kindSelect.value}}",
+          "cost": "{{components.costInput.value || 0}}"
+        }
+      },
+      "run_on_page_load": false
+    },
+    {
+      "name": "publish_listing",
+      "data_source": "n8n_api",
+      "kind": "restapi",
+      "options": {
+        "method": "post",
+        "url_path": "/webhook/etsy-listing-publish",
+        "body_toggle": true,
+        "json_body": { "listing_id": "{{queries.generate_listing.data.listing.id}}" }
+      },
+      "run_on_page_load": false
+    }
+  ],
+  "pages": [
+    {
+      "id": "dashboard",
+      "name": "Dashboard",
+      "is_home": true,
+      "components": [
+        { "id": "h1", "type": "Text", "props": { "text": "Etsy AI Dashboard" } },
+        { "id": "kpiRevenue", "type": "StatisticsCard", "props": { "label": "Revenue today (USD)", "value": "{{queries.kpi_today.data[0].revenue}}" } },
+        { "id": "kpiOrders",  "type": "StatisticsCard", "props": { "label": "Orders today",        "value": "{{queries.kpi_today.data[0].orders}}" } },
+        { "id": "kpiProfit",  "type": "StatisticsCard", "props": { "label": "Profit today (USD)",  "value": "{{queries.kpi_today.data[0].profit}}" } }
+      ]
+    },
+    {
+      "id": "ai-tools",
+      "name": "AI Tools",
+      "components": [
+        { "id": "title", "type": "Text", "props": { "text": "AI Listing Generator" } },
+        {
+          "id": "shopSelect", "type": "Dropdown",
+          "props": {
+            "label": "Shop",
+            "values_source": "{{queries.list_shops.data.map(s => s.id)}}",
+            "labels_source": "{{queries.list_shops.data.map(s => s.name)}}",
+            "default_value": "{{constants.DEFAULT_SHOP_ID}}"
+          }
+        },
+        { "id": "nicheInput", "type": "TextInput", "props": { "label": "Niche / description", "placeholder": "e.g. vintage botanical printables" } },
+        {
+          "id": "kindSelect", "type": "Dropdown",
+          "props": { "label": "Kind", "values": ["printable", "pod"], "default_value": "printable" }
+        },
+        { "id": "costInput", "type": "NumberInput", "props": { "label": "Cost (USD, POD only)", "default_value": 0 } },
+        {
+          "id": "generateBtn", "type": "Button",
+          "props": { "text": "Generate", "loading_state": "{{queries.generate_listing.isLoading}}" },
+          "events": [{ "event": "onClick", "action": "run-query", "query": "generate_listing" }]
+        },
+        { "id": "resultTitle",       "type": "Text", "props": { "text": "Title: {{queries.generate_listing.data.listing.title}}" } },
+        { "id": "resultTags",        "type": "Text", "props": { "text": "Tags: {{queries.generate_listing.data.listing.tags?.join(', ')}}" } },
+        { "id": "resultPrice",       "type": "Text", "props": { "text": "Suggested price: ${{queries.generate_listing.data.listing.price}}" } },
+        { "id": "resultDescription", "type": "TextArea", "props": { "value": "{{queries.generate_listing.data.listing.description}}", "rows": 8, "read_only": true } },
+        {
+          "id": "publishBtn", "type": "Button",
+          "props": { "text": "Publish to Etsy", "disabled": "{{!queries.generate_listing.data?.listing?.id}}" },
+          "events": [{ "event": "onClick", "action": "run-query", "query": "publish_listing" }]
+        }
+      ]
+    },
+    {
+      "id": "listings",
+      "name": "Listings",
+      "components": [
+        {
+          "id": "listingsTable", "type": "Table",
+          "props": {
+            "data": "{{queries.list_listings.data}}",
+            "columns": [
+              { "key": "id", "name": "ID" },
+              { "key": "shop", "name": "Shop" },
+              { "key": "title", "name": "Title" },
+              { "key": "kind", "name": "Kind" },
+              { "key": "price", "name": "Price" },
+              { "key": "status", "name": "Status" },
+              { "key": "created_at", "name": "Created" }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "orders",
+      "name": "Orders",
+      "components": [
+        { "id": "ordersStub", "type": "Text", "props": { "text": "Orders tab — wired in v2 alongside workflows 06 (Etsy sync) and 07 (POD routing)." } }
+      ]
+    },
+    {
+      "id": "analytics",
+      "name": "Analytics",
+      "components": [
+        { "id": "analyticsStub", "type": "Text", "props": { "text": "Analytics tab — implements multi-shop revenue / profit charts in v2 once order sync is live." } }
+      ]
+    }
+  ]
+}
