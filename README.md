@@ -149,6 +149,34 @@ in the webhook body (the ToolJet Visual Studio tab exposes this as a dropdown).
 
 ---
 
+## AI Ads Studio (workflow 03)
+
+`POST /webhook/ads-generate`
+
+```json
+{
+  "listing_id": 1,
+  "channels": ["pinterest", "x", "instagram"],
+  "generate_visual": true,
+  "schedule_at": "2026-05-04T15:00:00Z"
+}
+```
+
+`channels` defaults to all three. `generate_visual=true` calls workflow 02
+internally for a shared 1080² square; failures here are soft (the copy still
+queues). `schedule_at` defaults to `now()+1h`.
+
+One Ollama call returns a single JSON object covering every requested channel,
+each validated against its character/hashtag limits before insertion. The
+workflow fans out one row per channel into `scheduled_posts (status='queued')`
+and responds with the inserted rows.
+
+Workflow 08 (Promotion Scheduler — still stubbed) will be the eventual
+dispatcher; until then, queued posts can be exported manually from the ToolJet
+**AI Ads Studio** tab.
+
+---
+
 ## ComfyUI models
 
 ComfyUI ships without checkpoints. Drop weights into `comfyui/models/checkpoints/`:
@@ -229,7 +257,7 @@ ngrok http 5678   # n8n webhooks (use this URL as ETSY_REDIRECT_URI)
 |---|---------------------------|-----------|-------|
 | 1 | AI Listing Generator       | ✅ wired  | Mistral via Ollama; inserts draft listing |
 | 2 | AI Visual Studio           | ✅ wired  | SDXL/Flux via ComfyUI; mockups proxied through wf 02b |
-| 3 | AI Ads Studio              | 🟡 stub   | Combines wf 1 + wf 2 outputs into `scheduled_posts` |
+| 3 | AI Ads Studio              | ✅ wired  | Pinterest/X/Instagram copy via Ollama + optional visual |
 | 4 | Etsy OAuth Callback        | 🟡 stub   | PKCE token exchange → upsert `shops` |
 | 5 | Etsy Listing Publish       | 🟡 stub   | Create listing via Etsy v3 API |
 | 6 | Etsy Order Sync (cron)     | 🟡 stub   | Pull receipts every 15 min, route POD orders to wf 7 |
