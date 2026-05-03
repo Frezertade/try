@@ -168,6 +168,15 @@
       },
       "run_on_page_load": false,
       "options_extra": { "timeout_ms": 420000 }
+    },
+    {
+      "name": "list_shops_with_status",
+      "data_source": "etsy_app_db",
+      "kind": "postgresql",
+      "options": {
+        "query": "SELECT id, name, etsy_shop_id, CASE WHEN oauth_token IS NOT NULL AND token_expires > now() THEN 'connected' WHEN oauth_token IS NOT NULL THEN 'expired' ELSE 'not_connected' END AS status, token_expires FROM shops ORDER BY id;"
+      },
+      "run_on_page_load": true
     }
   ],
   "pages": [
@@ -268,6 +277,37 @@
             "row_template": [
               { "type": "Image", "props": { "source": "{{constants.N8N_URL}}/webhook/mockup-view?id={{listItem.id}}", "alt_text": "{{listItem.title}}" } },
               { "type": "Text",  "props": { "text": "#{{listItem.id}} · listing {{listItem.listing_id}} · {{listItem.created_at}}" } }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "shops",
+      "name": "Shops",
+      "components": [
+        { "id": "shopsTitle", "type": "Text", "props": { "text": "Connect an Etsy shop" } },
+        { "id": "newShopName", "type": "TextInput", "props": { "label": "Shop label (free text)", "placeholder": "My Test Shop" } },
+        {
+          "id": "connectShopBtn", "type": "Button",
+          "props": { "text": "Authorise on Etsy" },
+          "events": [
+            { "event": "onClick", "action": "open-url",
+              "url": "{{constants.N8N_URL}}/webhook/etsy-connect?shop_name={{encodeURIComponent(components.newShopName.value || 'My Shop')}}",
+              "open_in_new_tab": true }
+          ]
+        },
+        { "id": "shopsTableTitle", "type": "Text", "props": { "text": "Connected shops" } },
+        {
+          "id": "shopsTable", "type": "Table",
+          "props": {
+            "data": "{{queries.list_shops_with_status.data}}",
+            "columns": [
+              { "key": "id", "name": "ID" },
+              { "key": "name", "name": "Name" },
+              { "key": "etsy_shop_id", "name": "Etsy shop id" },
+              { "key": "status", "name": "Status" },
+              { "key": "token_expires", "name": "Token expires" }
             ]
           }
         }

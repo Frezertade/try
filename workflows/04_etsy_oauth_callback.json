@@ -1,5 +1,5 @@
 {
-  "name": "04 - Etsy OAuth Callback (stub)",
+  "name": "04 - Etsy OAuth Callback",
   "nodes": [
     {
       "parameters": {
@@ -17,33 +17,149 @@
     },
     {
       "parameters": {
-        "language": "javaScript",
-        "jsCode": "// TODO: exchange ?code=... for access+refresh tokens at\n// https://api.etsy.com/v3/public/oauth/token (PKCE), verifying state.\n// Then upsert into shops(oauth_token, refresh_token, token_expires).\nreturn [{ json: { ok: false, todo: 'Etsy OAuth callback not implemented in v1', received: $input.first().json.query } }];"
+        "operation": "executeQuery",
+        "query": "DELETE FROM oauth_states WHERE state = $1 AND expires_at > now() RETURNING shop_name, code_verifier, redirect_uri;",
+        "options": {
+          "queryReplacement": "={{ $json.query.state }}"
+        }
       },
-      "id": "wf04-todo",
-      "name": "TODO",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [460, 300]
+      "id": "wf04-pg-state",
+      "name": "Consume State",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [460, 300],
+      "credentials": {
+        "postgres": {
+          "id": "pg-etsy-app",
+          "name": "Postgres etsy_app"
+        }
+      }
     },
     {
       "parameters": {
-        "respondWith": "json",
-        "responseBody": "={{ $json }}"
+        "language": "javaScript",
+        "jsCode": "// Fail loudly if state lookup returned no row (replay or expired).\nconst row = $input.first().json;\nconst query = $('Webhook').first().json.query || {};\nif (!row || !row.code_verifier) {\n  throw new Error(`Invalid or expired state '${query.state}'. Restart from /webhook/etsy-connect.`);\n}\nif (!query.code) throw new Error('Missing ?code from Etsy redirect');\nreturn [{ json: { ...row, code: query.code } }];"
+      },
+      "id": "wf04-validate",
+      "name": "Validate",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.etsy.com/v3/public/oauth/token",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [{ "name": "Content-Type", "value": "application/x-www-form-urlencoded" }]
+        },
+        "sendBody": true,
+        "specifyBody": "string",
+        "body": "=grant_type=authorization_code&client_id={{ encodeURIComponent($env.ETSY_CLIENT_ID) }}&redirect_uri={{ encodeURIComponent($json.redirect_uri) }}&code={{ encodeURIComponent($json.code) }}&code_verifier={{ encodeURIComponent($json.code_verifier) }}",
+        "options": { "timeout": 30000 }
+      },
+      "id": "wf04-token",
+      "name": "Exchange Token",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [900, 300]
+    },
+    {
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "// Etsy access tokens are formatted 'user_id.access_token_string'.\n// Extract user_id and compute the absolute expiry timestamp.\nconst tok = $input.first().json;\nif (!tok.access_token) throw new Error(`Token exchange failed: ${JSON.stringify(tok)}`);\nconst userId = tok.access_token.split('.')[0];\nconst expiresAt = new Date(Date.now() + (tok.expires_in - 60) * 1000).toISOString();\nreturn [{ json: {\n  shop_name: $('Validate').item.json.shop_name,\n  user_id: userId,\n  access_token: tok.access_token,\n  refresh_token: tok.refresh_token,\n  token_expires: expiresAt\n} }];"
+      },
+      "id": "wf04-parse",
+      "name": "Parse Token",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1120, 300]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://openapi.etsy.com/v3/application/users/{{ $json.user_id }}/shops",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Bearer {{ $json.access_token }}" },
+            { "name": "x-api-key",     "value": "={{ $env.ETSY_CLIENT_ID }}" }
+          ]
+        },
+        "options": { "timeout": 30000 }
+      },
+      "id": "wf04-shops",
+      "name": "Fetch Shop",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1340, 300]
+    },
+    {
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "// Etsy returns either a single Shop object or {results:[Shop, ...]}.\n// Pick the first shop and merge with token data.\nconst raw = $input.first().json;\nconst shop = Array.isArray(raw.results) ? raw.results[0] : raw;\nif (!shop || (!shop.shop_id && !shop.shop_name)) {\n  throw new Error(`No Etsy shop found on this user: ${JSON.stringify(raw)}`);\n}\nconst tok = $('Parse Token').item.json;\nreturn [{ json: {\n  shop_name:    shop.shop_name || tok.shop_name,\n  etsy_shop_id: String(shop.shop_id),\n  oauth_token:  tok.access_token,\n  refresh_token: tok.refresh_token,\n  token_expires: tok.token_expires\n} }];"
+      },
+      "id": "wf04-merge",
+      "name": "Merge Shop",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1560, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO shops (name, etsy_shop_id, oauth_token, refresh_token, token_expires) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (etsy_shop_id) DO UPDATE SET name = EXCLUDED.name, oauth_token = EXCLUDED.oauth_token, refresh_token = EXCLUDED.refresh_token, token_expires = EXCLUDED.token_expires RETURNING id, name, etsy_shop_id;",
+        "options": {
+          "queryReplacement": "={{ $json.shop_name }},={{ $json.etsy_shop_id }},={{ $json.oauth_token }},={{ $json.refresh_token }},={{ $json.token_expires }}"
+        }
+      },
+      "id": "wf04-pg-shop",
+      "name": "Upsert Shop",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1780, 300],
+      "credentials": {
+        "postgres": {
+          "id": "pg-etsy-app",
+          "name": "Postgres etsy_app"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "=<!doctype html><meta charset=\"utf-8\"><title>Etsy connected</title><style>body{font-family:system-ui;max-width:540px;margin:80px auto;padding:0 16px}.ok{padding:16px;background:#e7f5ec;border-radius:6px;color:#0b6b2c}</style><h1>Shop connected ✓</h1><div class=\"ok\">Shop <strong>{{ $json.name }}</strong> (Etsy id <code>{{ $json.etsy_shop_id }}</code>) is now linked. Internal id: {{ $json.id }}.</div><p>You can close this tab and return to the dashboard.</p>",
+        "options": {
+          "responseHeaders": {
+            "entries": [{ "name": "Content-Type", "value": "text/html; charset=utf-8" }]
+          }
+        }
       },
       "id": "wf04-respond",
       "name": "Respond",
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1,
-      "position": [680, 300]
+      "position": [2000, 300]
     }
   ],
   "connections": {
-    "Webhook": { "main": [[{ "node": "TODO", "type": "main", "index": 0 }]] },
-    "TODO": { "main": [[{ "node": "Respond", "type": "main", "index": 0 }]] }
+    "Webhook":        { "main": [[{ "node": "Consume State",  "type": "main", "index": 0 }]] },
+    "Consume State":  { "main": [[{ "node": "Validate",       "type": "main", "index": 0 }]] },
+    "Validate":       { "main": [[{ "node": "Exchange Token", "type": "main", "index": 0 }]] },
+    "Exchange Token": { "main": [[{ "node": "Parse Token",    "type": "main", "index": 0 }]] },
+    "Parse Token":    { "main": [[{ "node": "Fetch Shop",     "type": "main", "index": 0 }]] },
+    "Fetch Shop":     { "main": [[{ "node": "Merge Shop",     "type": "main", "index": 0 }]] },
+    "Merge Shop":     { "main": [[{ "node": "Upsert Shop",    "type": "main", "index": 0 }]] },
+    "Upsert Shop":    { "main": [[{ "node": "Respond",        "type": "main", "index": 0 }]] }
   },
   "active": false,
-  "settings": { "executionOrder": "v1" },
-  "tags": [{ "name": "etsy" }, { "name": "stub" }],
-  "meta": { "description": "Stub. Implement Etsy OAuth2 PKCE token exchange and shop upsert." }
+  "settings": {
+    "executionOrder": "v1",
+    "saveExecutionProgress": true,
+    "saveManualExecutions": true,
+    "saveDataErrorExecution": "all"
+  },
+  "tags": [{ "name": "etsy" }, { "name": "oauth" }],
+  "meta": { "description": "GET /webhook/etsy-oauth-callback?code=&state= — validates state via oauth_states (consumed atomically), exchanges code+verifier for tokens at api.etsy.com, fetches the user's first shop, upserts into shops with token+expiry." }
 }

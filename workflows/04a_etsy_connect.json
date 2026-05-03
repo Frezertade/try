@@ -1,0 +1,75 @@
+{
+  "name": "04a - Etsy Connect (start OAuth)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "GET",
+        "path": "etsy-connect",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "wf04a-webhook",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 300],
+      "webhookId": "etsy-connect"
+    },
+    {
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "// Generate PKCE state + verifier + S256 challenge, build the Etsy OAuth\n// authorisation URL. Reads ETSY_CLIENT_ID and ETSY_REDIRECT_URI from env.\nconst crypto = require('crypto');\n\nconst query = $input.first().json.query || {};\nconst shopName = (query.shop_name || query.name || '').trim();\nif (!shopName) throw new Error('Provide ?shop_name=<your shop label>');\n\nconst clientId    = process.env.ETSY_CLIENT_ID;\nconst redirectUri = process.env.ETSY_REDIRECT_URI;\nif (!clientId)    throw new Error('ETSY_CLIENT_ID is not set');\nif (!redirectUri) throw new Error('ETSY_REDIRECT_URI is not set');\n\n// PKCE values\nconst state         = crypto.randomBytes(16).toString('hex');\nconst codeVerifier  = crypto.randomBytes(48).toString('base64url');\nconst codeChallenge = crypto.createHash('sha256').update(codeVerifier).digest('base64url');\n\n// Scope set: enough for listing publish (listings_w), order sync\n// (transactions_r), and identifying the user (email_r).\nconst scope = 'email_r listings_w transactions_r';\n\nconst authUrl = 'https://www.etsy.com/oauth/connect?' + new URLSearchParams({\n  response_type:         'code',\n  client_id:             clientId,\n  redirect_uri:          redirectUri,\n  scope,\n  state,\n  code_challenge:        codeChallenge,\n  code_challenge_method: 'S256'\n}).toString();\n\nreturn [{ json: { state, code_verifier: codeVerifier, redirect_uri: redirectUri, shop_name: shopName, auth_url: authUrl } }];"
+      },
+      "id": "wf04a-pkce",
+      "name": "Generate PKCE",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO oauth_states (state, shop_name, code_verifier, redirect_uri) VALUES ($1, $2, $3, $4);",
+        "options": {
+          "queryReplacement": "={{ $json.state }},={{ $json.shop_name }},={{ $json.code_verifier }},={{ $json.redirect_uri }}"
+        }
+      },
+      "id": "wf04a-pg",
+      "name": "Save State",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [680, 300],
+      "credentials": {
+        "postgres": {
+          "id": "pg-etsy-app",
+          "name": "Postgres etsy_app"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "=<!doctype html><meta charset=\"utf-8\"><title>Connect Etsy shop</title><style>body{font-family:system-ui;max-width:540px;margin:80px auto;padding:0 16px}a.btn{display:inline-block;padding:12px 24px;background:#f56400;color:#fff;text-decoration:none;border-radius:6px;font-weight:600}small{color:#666}</style><h1>Connect <em>{{ $('Generate PKCE').item.json.shop_name }}</em></h1><p>Click below to authorise n8n on Etsy. You'll be redirected back here when it's done.</p><p><a class=\"btn\" href=\"{{ $('Generate PKCE').item.json.auth_url }}\">Authorise on Etsy →</a></p><p><small>State token: <code>{{ $('Generate PKCE').item.json.state }}</code> (valid 10 min)</small></p>",
+        "options": {
+          "responseHeaders": {
+            "entries": [{ "name": "Content-Type", "value": "text/html; charset=utf-8" }]
+          }
+        }
+      },
+      "id": "wf04a-respond",
+      "name": "Respond",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [900, 300]
+    }
+  ],
+  "connections": {
+    "Webhook":        { "main": [[{ "node": "Generate PKCE", "type": "main", "index": 0 }]] },
+    "Generate PKCE": { "main": [[{ "node": "Save State",    "type": "main", "index": 0 }]] },
+    "Save State":    { "main": [[{ "node": "Respond",       "type": "main", "index": 0 }]] }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "etsy" }, { "name": "oauth" }],
+  "meta": { "description": "GET /webhook/etsy-connect?shop_name=My+Shop → renders an HTML page with an Etsy OAuth authorise link. Generates PKCE state+verifier+challenge, persists them in oauth_states for 10 min so the callback (wf 04) can validate." }
+}

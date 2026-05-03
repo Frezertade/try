@@ -177,6 +177,57 @@ dispatcher; until then, queued posts can be exported manually from the ToolJet
 
 ---
 
+## Etsy connect + publish (workflows 04a, 04, 05)
+
+Three workflows cooperate. PKCE OAuth — no client secret needed.
+
+### 1. Configure the Etsy app
+- Create an app at https://www.etsy.com/developers/your-apps. Set the
+  **Callback URLs** entry to match `ETSY_REDIRECT_URI` from `.env`
+  (default `http://localhost:5678/webhook/etsy-oauth-callback`).
+- Copy the **Keystring** to `ETSY_CLIENT_ID`. `ETSY_CLIENT_SECRET` is unused
+  by the PKCE flow but kept in `.env.example` for compatibility.
+- Restart n8n: `docker compose restart n8n`.
+
+### 2. Apply the OAuth migration (existing installs only)
+Fresh installs pick this up automatically. For installs that already booted
+on the v1 schema:
+```bash
+docker compose exec -T postgres psql -U "$POSTGRES_USER" -d etsy_app \
+  < db/migrations/2026-05-03_etsy_oauth.sql
+```
+
+### 3. Connect a shop
+Open in a browser:
+```
+http://localhost:5678/webhook/etsy-connect?shop_name=My+Test+Shop
+```
+You'll see an "Authorise on Etsy" button. After approving, Etsy redirects
+back to `/webhook/etsy-oauth-callback`, which exchanges the code, fetches
+the shop, and upserts a row into `shops` with the access + refresh tokens.
+
+### 4. Publish a draft listing
+```bash
+curl -X POST http://localhost:5678/webhook/etsy-listing-publish \
+  -H 'content-type: application/json' \
+  -d '{"listing_id":1}'
+```
+The workflow refreshes the token if it's within 60 s of expiry (writing the
+new token back to `shops`), POSTs the createDraftListing payload to
+`openapi.etsy.com/v3/application/shops/{shop_id}/listings`, and updates
+`listings.etsy_listing_id` + `status='published'`.
+
+Listings always land on Etsy in **draft** state for human review. Flip the
+`state` field in the workflow 05 "Build Etsy Payload" node to `active` once
+you trust the AI outputs.
+
+> **Heads-up:** the default `taxonomy_id` is `6884` (catch-all art); pick a
+> better one per niche from
+> https://openapi.etsy.com/v3/application/seller-taxonomy/nodes for higher
+> Etsy SEO ranking.
+
+---
+
 ## ComfyUI models
 
 ComfyUI ships without checkpoints. Drop weights into `comfyui/models/checkpoints/`:
@@ -258,8 +309,8 @@ ngrok http 5678   # n8n webhooks (use this URL as ETSY_REDIRECT_URI)
 | 1 | AI Listing Generator       | ✅ wired  | Mistral via Ollama; inserts draft listing |
 | 2 | AI Visual Studio           | ✅ wired  | SDXL/Flux via ComfyUI; mockups proxied through wf 02b |
 | 3 | AI Ads Studio              | ✅ wired  | Pinterest/X/Instagram copy via Ollama + optional visual |
-| 4 | Etsy OAuth Callback        | 🟡 stub   | PKCE token exchange → upsert `shops` |
-| 5 | Etsy Listing Publish       | 🟡 stub   | Create listing via Etsy v3 API |
+| 4 | Etsy Connect + OAuth (04a, 04) | ✅ wired | PKCE flow; shops auto-upserted on callback |
+| 5 | Etsy Listing Publish       | ✅ wired  | Token refresh + createDraftListing in `state=draft` |
 | 6 | Etsy Order Sync (cron)     | 🟡 stub   | Pull receipts every 15 min, route POD orders to wf 7 |
 | 7 | POD Route Order            | 🟡 stub   | Branch on `pod_provider`, call Printify or Printful |
 | 8 | Promotion Scheduler (cron) | 🟡 stub   | Dispatch due `scheduled_posts` |
