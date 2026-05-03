@@ -63,7 +63,7 @@
       "data_source": "etsy_app_db",
       "kind": "postgresql",
       "options": {
-        "query": "SELECT COALESCE(SUM(revenue),0) AS revenue, COALESCE(SUM(orders),0) AS orders, COALESCE(SUM(profit),0) AS profit FROM analytics_daily WHERE day = CURRENT_DATE;"
+        "query": "SELECT COALESCE(SUM(o.total),0) AS revenue, COUNT(*) AS orders, COALESCE(SUM(CASE WHEN p.kind = 'printable' THEN o.total * 0.95 ELSE o.total - COALESCE(p.cost,0) END),0) AS profit FROM orders o LEFT JOIN shops s ON s.id = o.shop_id LEFT JOIN products p ON p.shop_id = s.id WHERE o.created_at::date = CURRENT_DATE;"
       },
       "run_on_page_load": true
     },

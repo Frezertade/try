@@ -71,6 +71,15 @@ services:
       GENERIC_TIMEZONE: ${GENERIC_TIMEZONE}
       # Allow workflows to reach sibling services by name
       N8N_DEFAULT_BINARY_DATA_MODE: filesystem
+      # Surfaced to workflow Code nodes via process.env.*
+      ETSY_CLIENT_ID: ${ETSY_CLIENT_ID}
+      ETSY_CLIENT_SECRET: ${ETSY_CLIENT_SECRET}
+      ETSY_REDIRECT_URI: ${ETSY_REDIRECT_URI}
+      PRINTIFY_API_KEY: ${PRINTIFY_API_KEY}
+      PRINTFUL_API_KEY: ${PRINTFUL_API_KEY}
+      PINTEREST_WEBHOOK_URL: ${PINTEREST_WEBHOOK_URL}
+      X_WEBHOOK_URL: ${X_WEBHOOK_URL}
+      INSTAGRAM_WEBHOOK_URL: ${INSTAGRAM_WEBHOOK_URL}
     volumes:
       - n8n_data:/home/node/.n8n
       - ./workflows:/workflows:ro

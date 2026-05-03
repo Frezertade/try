@@ -1,5 +1,5 @@
 {
-  "name": "08 - Promotion Scheduler (stub)",
+  "name": "08 - Promotion Scheduler",
   "nodes": [
     {
       "parameters": {
@@ -15,21 +15,85 @@
     },
     {
       "parameters": {
-        "language": "javaScript",
-        "jsCode": "// TODO: SELECT * FROM scheduled_posts WHERE status='queued' AND scheduled_for<=now()\n// For each: post to channel API (or write to a CSV export for manual posting),\n// then UPDATE scheduled_posts SET status='posted'.\nreturn [{ json: { ok: false, todo: 'Promotion scheduler not implemented in v1' } }];"
+        "operation": "executeQuery",
+        "query": "SELECT id, listing_id, channel, copy, image_path, scheduled_for FROM scheduled_posts WHERE status = 'queued' AND scheduled_for <= now() ORDER BY scheduled_for ASC LIMIT 25;"
       },
-      "id": "wf08-todo",
-      "name": "TODO",
+      "id": "wf08-pg-due",
+      "name": "Due Posts",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [460, 300],
+      "credentials": {
+        "postgres": {
+          "id": "pg-etsy-app",
+          "name": "Postgres etsy_app"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "// For each due post, dispatch to the per-channel outgoing webhook URL\n// configured via PINTEREST_WEBHOOK_URL / X_WEBHOOK_URL / INSTAGRAM_WEBHOOK_URL.\n// If a channel has no URL configured, mark the post 'ready_for_export' so the\n// dashboard can surface it for manual handling. This avoids implementing the\n// full Pinterest/X/Instagram OAuth+API flows here while still providing a real\n// integration path (Buffer, Make.com, n8n's own social nodes, etc.).\n\nconst envByChannel = {\n  pinterest: process.env.PINTEREST_WEBHOOK_URL,\n  x:         process.env.X_WEBHOOK_URL,\n  instagram: process.env.INSTAGRAM_WEBHOOK_URL\n};\n\nconst out = [];\nfor (const item of $input.all()) {\n  const post = item.json;\n  const url  = envByChannel[post.channel];\n\n  if (!url) {\n    out.push({ json: { _kind: 'mark', id: post.id, status: 'ready_for_export', error: null } });\n    continue;\n  }\n\n  try {\n    const res = await this.helpers.httpRequest({\n      method: 'POST',\n      url,\n      headers: { 'Content-Type': 'application/json' },\n      body: {\n        post_id:       post.id,\n        listing_id:    post.listing_id,\n        channel:       post.channel,\n        copy:          post.copy,\n        image_path:    post.image_path,\n        scheduled_for: post.scheduled_for\n      },\n      json: true,\n      timeout: 30000,\n      // Treat any 2xx as success. Non-2xx throws and lands in catch.\n      ignoreHttpStatusErrors: false\n    });\n    out.push({ json: { _kind: 'mark', id: post.id, status: 'posted', error: null, response: res } });\n  } catch (e) {\n    out.push({ json: { _kind: 'mark', id: post.id, status: 'failed', error: String(e?.message || e).slice(0, 500) } });\n  }\n}\n\n// Always emit a tail summary item (won't be marked, just used for logs).\nout.push({ json: { _kind: 'summary', dispatched: $input.all().length } });\nreturn out;"
+      },
+      "id": "wf08-dispatch",
+      "name": "Dispatch",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [460, 300]
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            { "conditions": { "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" }, "combinator": "and",
+              "conditions": [{ "leftValue": "={{ $json._kind }}", "rightValue": "mark", "operator": { "type": "string", "operation": "equals" } }] },
+              "renameOutput": true, "outputKey": "mark" }
+          ]
+        },
+        "options": { "fallbackOutput": "extra" }
+      },
+      "id": "wf08-switch",
+      "name": "Mark Only",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [900, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE scheduled_posts SET status = $1 WHERE id = $2 RETURNING id, status;",
+        "options": {
+          "queryReplacement": "={{ $json.status }},={{ $json.id }}"
+        }
+      },
+      "id": "wf08-pg-update",
+      "name": "Update Status",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1120, 300],
+      "credentials": {
+        "postgres": {
+          "id": "pg-etsy-app",
+          "name": "Postgres etsy_app"
+        }
+      }
     }
   ],
   "connections": {
-    "Every 5 min": { "main": [[{ "node": "TODO", "type": "main", "index": 0 }]] }
+    "Every 5 min":   { "main": [[{ "node": "Due Posts",     "type": "main", "index": 0 }]] },
+    "Due Posts":     { "main": [[{ "node": "Dispatch",      "type": "main", "index": 0 }]] },
+    "Dispatch":      { "main": [[{ "node": "Mark Only",     "type": "main", "index": 0 }]] },
+    "Mark Only":     { "main": [
+                          [{ "node": "Update Status", "type": "main", "index": 0 }]
+                        ] }
   },
   "active": false,
-  "settings": { "executionOrder": "v1" },
-  "tags": [{ "name": "promo" }, { "name": "stub" }],
-  "meta": { "description": "Stub. Polls scheduled_posts and dispatches due ones." }
+  "settings": {
+    "executionOrder": "v1",
+    "saveExecutionProgress": true,
+    "saveManualExecutions": true,
+    "saveDataErrorExecution": "all"
+  },
+  "tags": [{ "name": "promo" }, { "name": "scheduler" }],
+  "meta": { "description": "Cron (5 min). Pulls scheduled_posts WHERE status='queued' AND scheduled_for<=now(). For each, POSTs the post body to the per-channel webhook URL set via PINTEREST_WEBHOOK_URL / X_WEBHOOK_URL / INSTAGRAM_WEBHOOK_URL (e.g. Buffer, Make.com, or another n8n workflow). If no URL is configured for a channel, the post is moved to status='ready_for_export' so the operator can post manually from the dashboard." }
 }

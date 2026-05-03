@@ -286,6 +286,57 @@ curl -X POST http://localhost:5678/webhook/pod-route \
 
 ---
 
+## Promotion scheduler (workflow 08)
+
+`08 - Promotion Scheduler` runs every 5 minutes. It pulls
+`scheduled_posts WHERE status='queued' AND scheduled_for<=now()` (limit 25)
+and dispatches each post to the outgoing webhook URL for its channel.
+
+### 1. Apply the migration (existing installs)
+```bash
+docker compose exec -T postgres psql -U "$POSTGRES_USER" -d etsy_app \
+  < db/migrations/2026-05-03_promotion_scheduler.sql
+```
+Relaxes `scheduled_posts.status` to allow the new `'ready_for_export'` value.
+
+### 2. Configure per-channel webhook URLs
+Set any combination in `.env`:
+```
+PINTEREST_WEBHOOK_URL=https://your-buffer-or-make-or-zapier-endpoint.example
+X_WEBHOOK_URL=
+INSTAGRAM_WEBHOOK_URL=
+```
+Each URL receives a JSON `POST` with:
+```json
+{ "post_id": 1, "listing_id": 42, "channel": "pinterest",
+  "copy": "...", "image_path": "etsy/listing-42/00001.png",
+  "scheduled_for": "2026-05-04T15:00:00Z" }
+```
+Restart n8n after changes (`docker compose restart n8n`) so the new env
+vars are visible to Code nodes.
+
+A 2xx response → `status='posted'`. Any non-2xx or network error →
+`status='failed'`. **No URL configured for a channel → the post moves to
+`status='ready_for_export'`** and shows up in the AI Ads Studio table for
+manual handling. This sidesteps building three separate OAuth integrations
+(Pinterest, X, Instagram) while still giving a real automation path: point
+the URL at Buffer, Make.com, Zapier, or another n8n workflow that owns the
+channel-specific OAuth.
+
+### Smoke test
+```bash
+# Queue an immediate post
+curl -X POST http://localhost:5678/webhook/ads-generate \
+  -H 'content-type: application/json' \
+  -d '{"listing_id":1,"channels":["pinterest"],"schedule_at":"2026-01-01T00:00:00Z"}'
+
+# Manually trigger wf 08 from the n8n UI, or wait <5 min
+docker compose exec postgres psql -U "$POSTGRES_USER" -d etsy_app \
+  -c "SELECT id, channel, status FROM scheduled_posts ORDER BY id DESC LIMIT 5;"
+```
+
+---
+
 ## ComfyUI models
 
 ComfyUI ships without checkpoints. Drop weights into `comfyui/models/checkpoints/`:
@@ -371,11 +422,10 @@ ngrok http 5678   # n8n webhooks (use this URL as ETSY_REDIRECT_URI)
 | 5 | Etsy Listing Publish       | ✅ wired  | Token refresh + createDraftListing in `state=draft` |
 | 6 | Etsy Order Sync (cron)     | ✅ wired  | 15-min cron, watermarked, refreshes tokens, dispatches POD |
 | 7 | POD Route Order            | ✅ wired  | Printify + Printful; soft-fails to `status=pod_pending` if metadata missing |
-| 8 | Promotion Scheduler (cron) | 🟡 stub   | Dispatch due `scheduled_posts` |
+| 8 | Promotion Scheduler (cron) | ✅ wired  | 5-min cron, per-channel outgoing webhook handoff |
 
-ToolJet tabs **Dashboard / Orders / Analytics** depend on workflow 6 emitting
-data into `orders` + `analytics_daily`; once that's live, swap the placeholder
-text for the relevant Postgres queries.
+All eight workflows are now end-to-end. Dashboard KPIs read from `orders`
+directly (no analytics_daily rollup needed for v1).
 
 ---
 
