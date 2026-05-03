@@ -132,6 +132,42 @@
       },
       "run_on_page_load": false,
       "options_extra": { "timeout_ms": 360000 }
+    },
+    {
+      "name": "list_listings_for_ads",
+      "data_source": "etsy_app_db",
+      "kind": "postgresql",
+      "options": {
+        "query": "SELECT l.id, l.title FROM listings l ORDER BY l.created_at DESC LIMIT 200;"
+      },
+      "run_on_page_load": true
+    },
+    {
+      "name": "list_scheduled_posts",
+      "data_source": "etsy_app_db",
+      "kind": "postgresql",
+      "options": {
+        "query": "SELECT sp.id, sp.listing_id, l.title, sp.channel, sp.status, sp.scheduled_for, LEFT(sp.copy, 120) AS preview FROM scheduled_posts sp JOIN listings l ON l.id = sp.listing_id ORDER BY sp.scheduled_for DESC LIMIT 100;"
+      },
+      "run_on_page_load": true
+    },
+    {
+      "name": "generate_ads",
+      "data_source": "n8n_api",
+      "kind": "restapi",
+      "options": {
+        "method": "post",
+        "url_path": "/webhook/ads-generate",
+        "body_toggle": true,
+        "json_body": {
+          "listing_id": "{{components.adsListingSelect.value}}",
+          "channels": "{{components.adsChannelsMulti.value}}",
+          "generate_visual": "{{components.adsGenerateVisual.value}}",
+          "schedule_at": "{{components.adsScheduleAt.value || null}}"
+        }
+      },
+      "run_on_page_load": false,
+      "options_extra": { "timeout_ms": 420000 }
     }
   ],
   "pages": [
@@ -232,6 +268,67 @@
             "row_template": [
               { "type": "Image", "props": { "source": "{{constants.N8N_URL}}/webhook/mockup-view?id={{listItem.id}}", "alt_text": "{{listItem.title}}" } },
               { "type": "Text",  "props": { "text": "#{{listItem.id}} · listing {{listItem.listing_id}} · {{listItem.created_at}}" } }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "ai-ads",
+      "name": "AI Ads Studio",
+      "components": [
+        { "id": "adsTitle", "type": "Text", "props": { "text": "Generate channel-specific ad copy + queue posts" } },
+        {
+          "id": "adsListingSelect", "type": "Dropdown",
+          "props": {
+            "label": "Listing",
+            "values_source": "{{queries.list_listings_for_ads.data.map(l => l.id)}}",
+            "labels_source": "{{queries.list_listings_for_ads.data.map(l => l.title)}}"
+          }
+        },
+        {
+          "id": "adsChannelsMulti", "type": "Multiselect",
+          "props": {
+            "label": "Channels",
+            "values": ["pinterest", "x", "instagram"],
+            "labels": ["Pinterest", "X", "Instagram"],
+            "default_value": ["pinterest", "x", "instagram"]
+          }
+        },
+        {
+          "id": "adsGenerateVisual", "type": "ToggleSwitch",
+          "props": { "label": "Also generate a 1080² visual", "default_value": false }
+        },
+        {
+          "id": "adsScheduleAt", "type": "DatetimePicker",
+          "props": { "label": "Schedule for (optional, default = +1 hour)" }
+        },
+        {
+          "id": "generateAdsBtn", "type": "Button",
+          "props": { "text": "Generate + queue", "loading_state": "{{queries.generate_ads.isLoading}}" },
+          "events": [
+            { "event": "onClick",   "action": "run-query", "query": "generate_ads" },
+            { "event": "onSuccess", "action": "run-query", "query": "list_scheduled_posts" }
+          ]
+        },
+        {
+          "id": "adsResult", "type": "Text",
+          "props": {
+            "text": "Queued: {{(queries.generate_ads.data?.scheduled || []).map(p => p.channel).join(', ')}}",
+            "visible": "{{queries.generate_ads.data?.ok}}"
+          }
+        },
+        {
+          "id": "scheduledTable", "type": "Table",
+          "props": {
+            "data": "{{queries.list_scheduled_posts.data}}",
+            "columns": [
+              { "key": "id", "name": "ID" },
+              { "key": "title", "name": "Listing" },
+              { "key": "channel", "name": "Channel" },
+              { "key": "status", "name": "Status" },
+              { "key": "scheduled_for", "name": "Scheduled for" },
+              { "key": "preview", "name": "Copy preview" }
             ]
           }
         }

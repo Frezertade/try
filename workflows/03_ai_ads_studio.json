@@ -1,5 +1,5 @@
 {
-  "name": "03 - AI Ads Studio (stub)",
+  "name": "03 - AI Ads Studio",
   "nodes": [
     {
       "parameters": {
@@ -17,33 +17,110 @@
     },
     {
       "parameters": {
-        "language": "javaScript",
-        "jsCode": "// TODO: 1) fetch listing by id from Postgres\n//       2) POST to Ollama for ad copy (Pinterest/X/Instagram variants)\n//       3) POST to ComfyUI for ad visual (square + portrait)\n//       4) INSERT INTO scheduled_posts with status='queued'.\nreturn [{ json: { ok: false, todo: 'AI Ads Studio not implemented in v1' } }];"
+        "operation": "executeQuery",
+        "query": "SELECT l.id AS listing_id, l.title, l.description, l.tags, l.price, p.niche, p.kind FROM listings l JOIN products p ON p.id = l.product_id WHERE l.id = $1;",
+        "options": {
+          "queryReplacement": "={{ ($json.body || $json).listing_id }}"
+        }
       },
-      "id": "wf03-todo",
-      "name": "TODO",
+      "id": "wf03-pg-listing",
+      "name": "Fetch Listing",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [460, 300],
+      "credentials": {
+        "postgres": {
+          "id": "pg-etsy-app",
+          "name": "Postgres etsy_app"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "// Build a strict-JSON LLM prompt covering all three channels in one call.\nconst body = $('Webhook').first().json.body || $('Webhook').first().json;\nconst listing = $input.first().json;\n\nif (!listing) throw new Error(`Listing ${body.listing_id} not found`);\n\nconst allowed = ['pinterest', 'x', 'instagram'];\nconst requested = Array.isArray(body.channels) && body.channels.length\n  ? body.channels.filter(c => allowed.includes(c))\n  : allowed;\nif (!requested.length) throw new Error('No valid channels requested');\n\nconst generateVisual = body.generate_visual === true || body.generate_visual === 'true';\nconst scheduleAt = body.schedule_at || null;\n\nconst system = `You are a social media copywriter. Output ONLY valid minified JSON.\nSchema (omit channels NOT in this list: ${requested.join(', ')}):\n{\n  \"pinterest\": {\"title\": string<=100, \"description\": string<=500, \"hashtags\": string[5..10]},\n  \"x\":         {\"post\":  string<=280},\n  \"instagram\": {\"caption\": string<=2200, \"hashtags\": string[10..30]}\n}\nRules:\n- Pinterest copy is descriptive and aspirational (vertical-pin context).\n- X copy fits 280 chars including hashtags; punchy, 1-3 hashtags.\n- Instagram caption is friendly with light emoji; hashtags sit after the caption.\n- Never invent prices or discounts. Always keyword-rich for the niche.`;\n\nconst tagsCsv = Array.isArray(listing.tags) ? listing.tags.join(', ') : '';\nconst user = `Listing title: ${listing.title}\\nNiche: ${listing.niche || ''}\\nKind: ${listing.kind}\\nPrice: $${listing.price}\\nTop tags: ${tagsCsv}\\nDescription: ${listing.description}`;\n\nreturn [{ json: {\n  listing_id: listing.listing_id,\n  channels: requested,\n  generate_visual: generateVisual,\n  schedule_at: scheduleAt,\n  prompt: `${system}\\n\\n${user}`\n} }];"
+      },
+      "id": "wf03-build",
+      "name": "Build Prompt",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [460, 300]
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://ollama:11434/api/generate",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"mistral:7b-instruct-q4_K_M\",\n  \"prompt\": {{ JSON.stringify($json.prompt) }},\n  \"format\": \"json\",\n  \"stream\": false,\n  \"options\": { \"temperature\": 0.8 }\n}",
+        "options": { "timeout": 120000 }
+      },
+      "id": "wf03-ollama",
+      "name": "Call Ollama",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [900, 300]
+    },
+    {
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "// Parse + validate + optionally call workflow 02 for a shared visual.\nconst ollama = $input.first().json;\nconst input = $('Build Prompt').first().json;\n\nlet parsed;\ntry {\n  parsed = typeof ollama.response === 'string' ? JSON.parse(ollama.response) : ollama.response;\n} catch (e) {\n  throw new Error(`LLM returned non-JSON: ${e.message}`);\n}\n\nconst channelToCopy = (channel) => {\n  const c = parsed[channel];\n  if (!c) throw new Error(`Missing copy for channel ${channel}`);\n  if (channel === 'pinterest') {\n    if (!c.title || c.title.length > 100) throw new Error('Pinterest title invalid');\n    if (!c.description || c.description.length > 500) throw new Error('Pinterest description invalid');\n    const hashtags = Array.isArray(c.hashtags) ? c.hashtags : [];\n    return `${c.title}\\n\\n${c.description}\\n\\n${hashtags.map(h => h.startsWith('#') ? h : '#' + h).join(' ')}`;\n  }\n  if (channel === 'x') {\n    if (!c.post || c.post.length > 280) throw new Error('X post invalid');\n    return c.post;\n  }\n  if (channel === 'instagram') {\n    if (!c.caption || c.caption.length > 2200) throw new Error('Instagram caption invalid');\n    const hashtags = Array.isArray(c.hashtags) ? c.hashtags : [];\n    return `${c.caption}\\n\\n${hashtags.map(h => h.startsWith('#') ? h : '#' + h).join(' ')}`;\n  }\n  return JSON.stringify(c);\n};\n\nlet imagePath = null;\nif (input.generate_visual) {\n  try {\n    const visual = await this.helpers.httpRequest({\n      method: 'POST',\n      url: 'http://localhost:5678/webhook/visual-generate',\n      body: { listing_id: input.listing_id, width: 1080, height: 1080 },\n      json: true,\n      timeout: 360000\n    });\n    imagePath = visual?.mockup?.file_path || null;\n  } catch (e) {\n    // Soft-fail: ad copy still goes out, just without a generated visual.\n    console.warn(`visual-generate failed: ${e.message}`);\n  }\n}\n\nconst scheduledFor = input.schedule_at\n  ? new Date(input.schedule_at).toISOString()\n  : new Date(Date.now() + 60 * 60 * 1000).toISOString();\n\n// Emit one item per channel so the Postgres node inserts each row independently.\nreturn input.channels.map(channel => ({\n  json: {\n    listing_id: input.listing_id,\n    channel,\n    copy: channelToCopy(channel),\n    image_path: imagePath,\n    scheduled_for: scheduledFor,\n    raw: parsed[channel] || null\n  }\n}));"
+      },
+      "id": "wf03-validate",
+      "name": "Validate + Visual",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1120, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO scheduled_posts (listing_id, channel, copy, image_path, scheduled_for, status) VALUES ($1, $2, $3, $4, $5, 'queued') RETURNING id, listing_id, channel, scheduled_for, status;",
+        "options": {
+          "queryReplacement": "={{ $json.listing_id }},={{ $json.channel }},={{ $json.copy }},={{ $json.image_path }},={{ $json.scheduled_for }}"
+        }
+      },
+      "id": "wf03-pg-post",
+      "name": "Insert Scheduled Post",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1340, 300],
+      "credentials": {
+        "postgres": {
+          "id": "pg-etsy-app",
+          "name": "Postgres etsy_app"
+        }
+      }
     },
     {
       "parameters": {
         "respondWith": "json",
-        "responseBody": "={{ $json }}"
+        "responseBody": "={{ { ok: true, scheduled: $items().map(i => i.json) } }}"
       },
       "id": "wf03-respond",
       "name": "Respond",
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1,
-      "position": [680, 300]
+      "position": [1560, 300]
     }
   ],
   "connections": {
-    "Webhook": { "main": [[{ "node": "TODO", "type": "main", "index": 0 }]] },
-    "TODO": { "main": [[{ "node": "Respond", "type": "main", "index": 0 }]] }
+    "Webhook":              { "main": [[{ "node": "Fetch Listing",        "type": "main", "index": 0 }]] },
+    "Fetch Listing":        { "main": [[{ "node": "Build Prompt",         "type": "main", "index": 0 }]] },
+    "Build Prompt":         { "main": [[{ "node": "Call Ollama",          "type": "main", "index": 0 }]] },
+    "Call Ollama":          { "main": [[{ "node": "Validate + Visual",    "type": "main", "index": 0 }]] },
+    "Validate + Visual":    { "main": [[{ "node": "Insert Scheduled Post","type": "main", "index": 0 }]] },
+    "Insert Scheduled Post":{ "main": [[{ "node": "Respond",              "type": "main", "index": 0 }]] }
   },
   "active": false,
-  "settings": { "executionOrder": "v1" },
-  "tags": [{ "name": "ai" }, { "name": "stub" }],
-  "meta": { "description": "Stub. Implement: listing_id → Ollama (copy) + ComfyUI (visual) → enqueue scheduled_posts." }
+  "settings": {
+    "executionOrder": "v1",
+    "saveExecutionProgress": true,
+    "saveManualExecutions": true,
+    "saveDataErrorExecution": "all"
+  },
+  "tags": [{ "name": "ai" }, { "name": "ads" }],
+  "meta": {
+    "description": "POST /webhook/ads-generate {listing_id, channels?, generate_visual?, schedule_at?}. Single Ollama call returns copy for Pinterest/X/Instagram, optional shared visual via workflow 02, fans out one scheduled_posts row per channel."
+  }
 }
