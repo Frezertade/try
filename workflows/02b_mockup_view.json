@@ -1,0 +1,102 @@
+{
+  "name": "02b - Mockup View (image proxy)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "GET",
+        "path": "mockup-view",
+        "responseMode": "responseNode",
+        "options": { "rawBody": false }
+      },
+      "id": "wf02b-webhook",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 300],
+      "webhookId": "mockup-view"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT id, file_path FROM mockups WHERE id = $1;",
+        "options": {
+          "queryReplacement": "={{ $json.query.id }}"
+        }
+      },
+      "id": "wf02b-pg",
+      "name": "Lookup",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [460, 300],
+      "credentials": {
+        "postgres": {
+          "id": "pg-etsy-app",
+          "name": "Postgres etsy_app"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "// Split the stored file_path into ComfyUI's (subfolder, filename) pair.\nconst row = $input.first().json;\nif (!row || !row.file_path) throw new Error('Mockup not found');\nconst parts = row.file_path.split('/');\nconst filename = parts.pop();\nconst subfolder = parts.join('/');\nreturn [{ json: { id: row.id, filename, subfolder } }];"
+      },
+      "id": "wf02b-split",
+      "name": "Split Path",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=http://comfyui:8188/view",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "filename",  "value": "={{ $json.filename }}" },
+            { "name": "subfolder", "value": "={{ $json.subfolder }}" },
+            { "name": "type",      "value": "output" }
+          ]
+        },
+        "options": {
+          "response": { "response": { "responseFormat": "file" } },
+          "timeout": 30000
+        }
+      },
+      "id": "wf02b-fetch",
+      "name": "Fetch PNG",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [900, 300]
+    },
+    {
+      "parameters": {
+        "respondWith": "binary",
+        "responseBodyBinaryPropertyName": "data",
+        "options": {
+          "responseHeaders": {
+            "entries": [
+              { "name": "Content-Type",  "value": "image/png" },
+              { "name": "Cache-Control", "value": "public, max-age=86400" }
+            ]
+          }
+        }
+      },
+      "id": "wf02b-respond",
+      "name": "Respond",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1120, 300]
+    }
+  ],
+  "connections": {
+    "Webhook":     { "main": [[{ "node": "Lookup",     "type": "main", "index": 0 }]] },
+    "Lookup":     { "main": [[{ "node": "Split Path", "type": "main", "index": 0 }]] },
+    "Split Path": { "main": [[{ "node": "Fetch PNG",  "type": "main", "index": 0 }]] },
+    "Fetch PNG":  { "main": [[{ "node": "Respond",    "type": "main", "index": 0 }]] }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "visuals" }],
+  "meta": { "description": "GET /webhook/mockup-view?id=N → proxies the PNG from ComfyUI /view. Lets ToolJet display mockups without exposing ComfyUI to the browser." }
+}

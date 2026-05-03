@@ -96,6 +96,7 @@ docker compose up -d              # n8n, tooljet, comfyui
 
 ### Smoke test
 
+**Listing generator (workflow 01):**
 ```bash
 curl -X POST http://localhost:5678/webhook/listing-generate \
   -H 'content-type: application/json' \
@@ -104,6 +105,47 @@ curl -X POST http://localhost:5678/webhook/listing-generate \
 
 Expected: JSON with `title`, 13 `tags`, `description`, `suggested_price`, plus
 a row inserted into `etsy_app.listings` (visible in ToolJet's **Listings** tab).
+
+**Visual studio (workflow 02 — requires a ComfyUI checkpoint installed; see
+[ComfyUI models](#comfyui-models)):**
+```bash
+curl -X POST http://localhost:5678/webhook/visual-generate \
+  -H 'content-type: application/json' \
+  -d '{"listing_id":1}'
+# Returns: { ok:true, mockup:{id, file_path, ...}, view_url:"/webhook/mockup-view?id=N" }
+
+# Fetch the PNG bytes:
+curl -o mockup.png "http://localhost:5678/webhook/mockup-view?id=1"
+```
+
+---
+
+## AI Visual Studio (workflow 02)
+
+Generates mockup images from a listing via ComfyUI. Two workflows cooperate:
+
+- **`02 - AI Visual Studio`** — `POST /webhook/visual-generate`
+  - Body: `{ listing_id, prompt?, negative?, width?, height?, steps?, cfg?, seed?, checkpoint? }`
+  - Pulls the listing from Postgres, builds a SDXL/Flux ComfyUI graph, queues it
+    on `comfyui:8188/prompt`, polls `/history/<id>`, then writes a row into
+    `mockups` and responds with a `view_url`.
+- **`02b - Mockup View`** — `GET /webhook/mockup-view?id=<mockup_id>`
+  - Looks up the mockup, fetches the PNG from ComfyUI's `/view` endpoint, and
+    streams it back. Lets the dashboard browser display images without
+    exposing ComfyUI publicly.
+
+The full SDXL graph is built dynamically in workflow 02; a static reference
+copy lives at `comfyui/workflows/sdxl_basic_api.json` so you can POST it
+directly to verify ComfyUI independently of n8n:
+
+```bash
+jq '{prompt: .}' comfyui/workflows/sdxl_basic_api.json \
+  | curl -s http://localhost:8188/prompt -H 'content-type: application/json' -d @-
+```
+
+To switch from SDXL to **Flux**, drop `flux1-dev.safetensors` into
+`comfyui/models/checkpoints/` and pass `"checkpoint":"flux1-dev.safetensors"`
+in the webhook body (the ToolJet Visual Studio tab exposes this as a dropdown).
 
 ---
 
@@ -186,7 +228,7 @@ ngrok http 5678   # n8n webhooks (use this URL as ETSY_REDIRECT_URI)
 | # | Workflow                  | v1 status | Notes |
 |---|---------------------------|-----------|-------|
 | 1 | AI Listing Generator       | ✅ wired  | Mistral via Ollama; inserts draft listing |
-| 2 | AI Visual Studio           | 🟡 stub   | Implement `POST /prompt` to ComfyUI + poll history |
+| 2 | AI Visual Studio           | ✅ wired  | SDXL/Flux via ComfyUI; mockups proxied through wf 02b |
 | 3 | AI Ads Studio              | 🟡 stub   | Combines wf 1 + wf 2 outputs into `scheduled_posts` |
 | 4 | Etsy OAuth Callback        | 🟡 stub   | PKCE token exchange → upsert `shops` |
 | 5 | Etsy Listing Publish       | 🟡 stub   | Create listing via Etsy v3 API |

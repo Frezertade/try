@@ -1,5 +1,5 @@
 {
-  "name": "02 - AI Visual Studio (stub)",
+  "name": "02 - AI Visual Studio",
   "nodes": [
     {
       "parameters": {
@@ -17,33 +17,112 @@
     },
     {
       "parameters": {
-        "language": "javaScript",
-        "jsCode": "// TODO: queue a ComfyUI workflow via POST http://comfyui:8188/prompt\n// Then poll /history/<prompt_id> until done, fetch image bytes from /view,\n// write to ./comfyui/output/<uuid>.png and INSERT INTO mockups (...).\nreturn [{ json: { ok: false, todo: 'AI Visual Studio not implemented in v1' } }];"
+        "operation": "executeQuery",
+        "query": "SELECT l.id AS listing_id, l.title, l.description, p.niche, p.kind FROM listings l JOIN products p ON p.id = l.product_id WHERE l.id = $1;",
+        "options": {
+          "queryReplacement": "={{ ($json.body || $json).listing_id }}"
+        }
       },
-      "id": "wf02-todo",
-      "name": "TODO",
+      "id": "wf02-pg-listing",
+      "name": "Fetch Listing",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [460, 300],
+      "credentials": {
+        "postgres": {
+          "id": "pg-etsy-app",
+          "name": "Postgres etsy_app"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "// Build the ComfyUI API workflow (SDXL text-to-image).\n// Either uses the user-supplied prompt, or synthesises one from the listing.\nconst body = $('Webhook').first().json.body || $('Webhook').first().json;\nconst listing = $('Fetch Listing').first().json;\n\nif (!listing) throw new Error(`Listing ${body.listing_id} not found`);\n\nconst userPrompt = (body.prompt || '').trim();\nconst prompt = userPrompt || `${listing.title}. ${listing.niche || ''}. clean studio mockup, soft lighting, high detail, product photography style`;\n\nconst negative = body.negative || 'low quality, blurry, watermark, text, signature, deformed';\nconst width  = Math.min(Math.max(parseInt(body.width  || 1024, 10), 256), 2048);\nconst height = Math.min(Math.max(parseInt(body.height || 1024, 10), 256), 2048);\nconst steps  = Math.min(Math.max(parseInt(body.steps  || 25,  10), 1),   80);\nconst cfg    = Math.min(Math.max(parseFloat(body.cfg  ?? 7.0),     1.0), 15.0);\nconst seed   = body.seed != null ? parseInt(body.seed, 10) : Math.floor(Math.random() * 1e9);\nconst checkpoint = body.checkpoint || 'sd_xl_base_1.0.safetensors';\nconst clientId   = `n8n-${$execution.id}`;\nconst filenamePrefix = `etsy/listing-${listing.listing_id}`;\n\n// ComfyUI API workflow (node graph). Loads checkpoint, encodes prompts,\n// runs the sampler, decodes latent, saves PNG to ComfyUI's output dir.\nconst workflow = {\n  '4': { class_type: 'CheckpointLoaderSimple', inputs: { ckpt_name: checkpoint } },\n  '5': { class_type: 'EmptyLatentImage',       inputs: { width, height, batch_size: 1 } },\n  '6': { class_type: 'CLIPTextEncode',         inputs: { text: prompt,   clip: ['4', 1] } },\n  '7': { class_type: 'CLIPTextEncode',         inputs: { text: negative, clip: ['4', 1] } },\n  '3': { class_type: 'KSampler', inputs: {\n            seed, steps, cfg,\n            sampler_name: 'euler', scheduler: 'normal', denoise: 1,\n            model:        ['4', 0],\n            positive:     ['6', 0],\n            negative:     ['7', 0],\n            latent_image: ['5', 0] } },\n  '8': { class_type: 'VAEDecode',  inputs: { samples: ['3', 0], vae: ['4', 2] } },\n  '9': { class_type: 'SaveImage',  inputs: { filename_prefix: filenamePrefix, images: ['8', 0] } }\n};\n\nreturn [{ json: { listing_id: listing.listing_id, prompt, negative, width, height, seed, steps, cfg, checkpoint, client_id: clientId, comfy_payload: { prompt: workflow, client_id: clientId } } }];"
+      },
+      "id": "wf02-build",
+      "name": "Build ComfyUI Workflow",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [460, 300]
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://comfyui:8188/prompt",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.comfy_payload) }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "wf02-queue",
+      "name": "Queue Prompt",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [900, 300]
+    },
+    {
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "// Poll ComfyUI /history/<prompt_id> until the job completes,\n// then return the first SaveImage output (filename + subfolder).\nconst queued = $input.first().json;\nconst promptId = queued.prompt_id || queued.body?.prompt_id;\nif (!promptId) throw new Error(`No prompt_id from ComfyUI: ${JSON.stringify(queued)}`);\n\nconst TIMEOUT_MS = 5 * 60 * 1000;\nconst POLL_MS = 2000;\nconst start = Date.now();\n\nwhile (Date.now() - start < TIMEOUT_MS) {\n  const res = await this.helpers.httpRequest({\n    method: 'GET',\n    url: `http://comfyui:8188/history/${promptId}`,\n    json: true\n  });\n  const entry = res[promptId];\n  if (entry && entry.outputs && Object.keys(entry.outputs).length > 0) {\n    for (const nodeId of Object.keys(entry.outputs)) {\n      const out = entry.outputs[nodeId];\n      if (out.images?.length) {\n        const img = out.images[0];\n        return [{ json: { prompt_id: promptId, filename: img.filename, subfolder: img.subfolder || '', type: img.type || 'output' } }];\n      }\n    }\n    throw new Error(`Job ${promptId} completed but produced no images`);\n  }\n  await new Promise(r => setTimeout(r, POLL_MS));\n}\nthrow new Error(`ComfyUI job ${promptId} timed out after ${TIMEOUT_MS}ms`);"
+      },
+      "id": "wf02-poll",
+      "name": "Poll History",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1120, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO mockups (listing_id, prompt, file_path) VALUES ($1, $2, $3) RETURNING id, listing_id, file_path, created_at;",
+        "options": {
+          "queryReplacement": "={{ $('Build ComfyUI Workflow').item.json.listing_id }},={{ $('Build ComfyUI Workflow').item.json.prompt }},={{ ($json.subfolder ? $json.subfolder + '/' : '') + $json.filename }}"
+        }
+      },
+      "id": "wf02-pg-mockup",
+      "name": "Insert Mockup",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1340, 300],
+      "credentials": {
+        "postgres": {
+          "id": "pg-etsy-app",
+          "name": "Postgres etsy_app"
+        }
+      }
     },
     {
       "parameters": {
         "respondWith": "json",
-        "responseBody": "={{ $json }}"
+        "responseBody": "={{ { ok: true, mockup: $json, view_url: '/webhook/mockup-view?id=' + $json.id } }}"
       },
       "id": "wf02-respond",
       "name": "Respond",
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1,
-      "position": [680, 300]
+      "position": [1560, 300]
     }
   ],
   "connections": {
-    "Webhook": { "main": [[{ "node": "TODO", "type": "main", "index": 0 }]] },
-    "TODO": { "main": [[{ "node": "Respond", "type": "main", "index": 0 }]] }
+    "Webhook":                { "main": [[{ "node": "Fetch Listing",         "type": "main", "index": 0 }]] },
+    "Fetch Listing":          { "main": [[{ "node": "Build ComfyUI Workflow","type": "main", "index": 0 }]] },
+    "Build ComfyUI Workflow": { "main": [[{ "node": "Queue Prompt",          "type": "main", "index": 0 }]] },
+    "Queue Prompt":           { "main": [[{ "node": "Poll History",          "type": "main", "index": 0 }]] },
+    "Poll History":           { "main": [[{ "node": "Insert Mockup",         "type": "main", "index": 0 }]] },
+    "Insert Mockup":          { "main": [[{ "node": "Respond",               "type": "main", "index": 0 }]] }
   },
   "active": false,
-  "settings": { "executionOrder": "v1" },
-  "tags": [{ "name": "ai" }, { "name": "stub" }],
-  "meta": { "description": "Stub. Implement: POST {prompt, listing_id} → ComfyUI /prompt → poll /history → save PNG → INSERT mockups." }
+  "settings": {
+    "executionOrder": "v1",
+    "saveExecutionProgress": true,
+    "saveManualExecutions": true,
+    "saveDataErrorExecution": "all"
+  },
+  "tags": [{ "name": "ai" }, { "name": "visuals" }],
+  "meta": {
+    "description": "Webhook → fetch listing → build SDXL ComfyUI graph → POST /prompt → poll /history → insert mockups row → respond. Default checkpoint sd_xl_base_1.0.safetensors; pass body.checkpoint='flux1-dev.safetensors' for Flux. Image bytes stay in comfyui/output volume; serve them via workflow 02b."
+  }
 }

@@ -95,6 +95,43 @@
         "json_body": { "listing_id": "{{queries.generate_listing.data.listing.id}}" }
       },
       "run_on_page_load": false
+    },
+    {
+      "name": "list_listings_for_visual",
+      "data_source": "etsy_app_db",
+      "kind": "postgresql",
+      "options": {
+        "query": "SELECT l.id, l.title FROM listings l ORDER BY l.created_at DESC LIMIT 200;"
+      },
+      "run_on_page_load": true
+    },
+    {
+      "name": "list_mockups",
+      "data_source": "etsy_app_db",
+      "kind": "postgresql",
+      "options": {
+        "query": "SELECT m.id, m.listing_id, l.title, m.prompt, m.file_path, m.created_at FROM mockups m JOIN listings l ON l.id = m.listing_id ORDER BY m.created_at DESC LIMIT 50;"
+      },
+      "run_on_page_load": true
+    },
+    {
+      "name": "generate_visual",
+      "data_source": "n8n_api",
+      "kind": "restapi",
+      "options": {
+        "method": "post",
+        "url_path": "/webhook/visual-generate",
+        "body_toggle": true,
+        "json_body": {
+          "listing_id": "{{components.visualListingSelect.value}}",
+          "prompt": "{{components.visualPromptInput.value || null}}",
+          "width":  "{{Number(components.visualSizeSelect.value || 1024)}}",
+          "height": "{{Number(components.visualSizeSelect.value || 1024)}}",
+          "checkpoint": "{{components.visualCheckpointSelect.value || 'sd_xl_base_1.0.safetensors'}}"
+        }
+      },
+      "run_on_page_load": false,
+      "options_extra": { "timeout_ms": 360000 }
     }
   ],
   "pages": [
@@ -142,6 +179,61 @@
           "id": "publishBtn", "type": "Button",
           "props": { "text": "Publish to Etsy", "disabled": "{{!queries.generate_listing.data?.listing?.id}}" },
           "events": [{ "event": "onClick", "action": "run-query", "query": "publish_listing" }]
+        }
+      ]
+    },
+    {
+      "id": "ai-visual",
+      "name": "AI Visual Studio",
+      "components": [
+        { "id": "vsTitle", "type": "Text", "props": { "text": "Generate mockups for a listing" } },
+        {
+          "id": "visualListingSelect", "type": "Dropdown",
+          "props": {
+            "label": "Listing",
+            "values_source": "{{queries.list_listings_for_visual.data.map(l => l.id)}}",
+            "labels_source": "{{queries.list_listings_for_visual.data.map(l => l.title)}}"
+          }
+        },
+        { "id": "visualPromptInput", "type": "TextArea", "props": { "label": "Prompt override (optional)", "placeholder": "Leave blank to auto-build from the listing.", "rows": 3 } },
+        {
+          "id": "visualSizeSelect", "type": "Dropdown",
+          "props": { "label": "Size", "values": ["768", "1024", "1280"], "labels": ["768²", "1024²", "1280²"], "default_value": "1024" }
+        },
+        {
+          "id": "visualCheckpointSelect", "type": "Dropdown",
+          "props": {
+            "label": "Checkpoint",
+            "values": ["sd_xl_base_1.0.safetensors", "flux1-dev.safetensors"],
+            "labels": ["SDXL base 1.0", "Flux dev"],
+            "default_value": "sd_xl_base_1.0.safetensors"
+          }
+        },
+        {
+          "id": "generateVisualBtn", "type": "Button",
+          "props": { "text": "Generate", "loading_state": "{{queries.generate_visual.isLoading}}" },
+          "events": [
+            { "event": "onClick", "action": "run-query", "query": "generate_visual" },
+            { "event": "onSuccess", "action": "run-query", "query": "list_mockups" }
+          ]
+        },
+        {
+          "id": "visualResult", "type": "Image",
+          "props": {
+            "source": "{{queries.generate_visual.data?.view_url ? constants.N8N_URL + queries.generate_visual.data.view_url : ''}}",
+            "alt_text": "Latest generated mockup",
+            "visible": "{{!!queries.generate_visual.data?.view_url}}"
+          }
+        },
+        {
+          "id": "mockupGallery", "type": "ListView",
+          "props": {
+            "data": "{{queries.list_mockups.data}}",
+            "row_template": [
+              { "type": "Image", "props": { "source": "{{constants.N8N_URL}}/webhook/mockup-view?id={{listItem.id}}", "alt_text": "{{listItem.title}}" } },
+              { "type": "Text",  "props": { "text": "#{{listItem.id}} · listing {{listItem.listing_id}} · {{listItem.created_at}}" } }
+            ]
+          }
         }
       ]
     },

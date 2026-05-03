@@ -74,6 +74,7 @@ services:
     volumes:
       - n8n_data:/home/node/.n8n
       - ./workflows:/workflows:ro
+      - ./comfyui/output:/comfyui-output:ro
     ports:
       - "${N8N_PORT}:5678"
     networks: [etsy_net]
