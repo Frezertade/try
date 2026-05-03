@@ -1,0 +1,49 @@
+{
+  "name": "04 - Etsy OAuth Callback (stub)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "GET",
+        "path": "etsy-oauth-callback",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "wf04-webhook",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 300],
+      "webhookId": "etsy-oauth-callback"
+    },
+    {
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "// TODO: exchange ?code=... for access+refresh tokens at\n// https://api.etsy.com/v3/public/oauth/token (PKCE), verifying state.\n// Then upsert into shops(oauth_token, refresh_token, token_expires).\nreturn [{ json: { ok: false, todo: 'Etsy OAuth callback not implemented in v1', received: $input.first().json.query } }];"
+      },
+      "id": "wf04-todo",
+      "name": "TODO",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}"
+      },
+      "id": "wf04-respond",
+      "name": "Respond",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [680, 300]
+    }
+  ],
+  "connections": {
+    "Webhook": { "main": [[{ "node": "TODO", "type": "main", "index": 0 }]] },
+    "TODO": { "main": [[{ "node": "Respond", "type": "main", "index": 0 }]] }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "etsy" }, { "name": "stub" }],
+  "meta": { "description": "Stub. Implement Etsy OAuth2 PKCE token exchange and shop upsert." }
+}

@@ -1,0 +1,24 @@
+# Caddy reverse proxy for Etsy AI Self-Hosted Dashboard.
+# Enable with:  docker compose --profile proxy up -d
+# Requires PUBLIC_DOMAIN and LETSENCRYPT_EMAIL set in .env, plus DNS pointing
+# the domain to this host on TCP/80 + TCP/443 (Caddy auto-issues certs via
+# Let's Encrypt).
+#
+# Routes:
+#   dashboard.<domain>  → tooljet
+#   n8n.<domain>        → n8n
+# ComfyUI is intentionally NOT exposed — its API has no auth.
+
+{
+    email {$LETSENCRYPT_EMAIL}
+}
+
+dashboard.{$PUBLIC_DOMAIN} {
+    encode zstd gzip
+    reverse_proxy tooljet:80
+}
+
+n8n.{$PUBLIC_DOMAIN} {
+    encode zstd gzip
+    reverse_proxy n8n:5678
+}

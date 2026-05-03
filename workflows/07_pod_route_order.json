@@ -1,0 +1,49 @@
+{
+  "name": "07 - POD Route Order (stub)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "pod-route",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "wf07-webhook",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 300],
+      "webhookId": "pod-route"
+    },
+    {
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "// TODO: based on body.pod_provider:\n//   printify  → POST https://api.printify.com/v1/shops/{shop_id}/orders.json\n//   printful  → POST https://api.printful.com/orders\n// Then UPDATE orders SET pod_order_id, status.\nreturn [{ json: { ok: false, todo: 'POD routing not implemented in v1', body: $input.first().json.body } }];"
+      },
+      "id": "wf07-todo",
+      "name": "TODO",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}"
+      },
+      "id": "wf07-respond",
+      "name": "Respond",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [680, 300]
+    }
+  ],
+  "connections": {
+    "Webhook": { "main": [[{ "node": "TODO", "type": "main", "index": 0 }]] },
+    "TODO": { "main": [[{ "node": "Respond", "type": "main", "index": 0 }]] }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "pod" }, { "name": "stub" }],
+  "meta": { "description": "Stub. Routes an order to Printify or Printful API." }
+}

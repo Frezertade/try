@@ -1,0 +1,24 @@
+# Secrets
+.env
+.env.local
+*.pem
+*.key
+
+# Service data (mounted volumes)
+db/data/
+n8n/data/
+tooljet/data/
+ollama/data/
+comfyui/models/
+comfyui/output/
+comfyui/input/
+
+# Caddy
+caddy/data/
+caddy/config/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+*.swp

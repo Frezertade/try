@@ -1,0 +1,49 @@
+{
+  "name": "03 - AI Ads Studio (stub)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "ads-generate",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "wf03-webhook",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 300],
+      "webhookId": "ads-generate"
+    },
+    {
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "// TODO: 1) fetch listing by id from Postgres\n//       2) POST to Ollama for ad copy (Pinterest/X/Instagram variants)\n//       3) POST to ComfyUI for ad visual (square + portrait)\n//       4) INSERT INTO scheduled_posts with status='queued'.\nreturn [{ json: { ok: false, todo: 'AI Ads Studio not implemented in v1' } }];"
+      },
+      "id": "wf03-todo",
+      "name": "TODO",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}"
+      },
+      "id": "wf03-respond",
+      "name": "Respond",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [680, 300]
+    }
+  ],
+  "connections": {
+    "Webhook": { "main": [[{ "node": "TODO", "type": "main", "index": 0 }]] },
+    "TODO": { "main": [[{ "node": "Respond", "type": "main", "index": 0 }]] }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "ai" }, { "name": "stub" }],
+  "meta": { "description": "Stub. Implement: listing_id → Ollama (copy) + ComfyUI (visual) → enqueue scheduled_posts." }
+}

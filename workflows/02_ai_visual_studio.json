@@ -1,0 +1,49 @@
+{
+  "name": "02 - AI Visual Studio (stub)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "visual-generate",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "wf02-webhook",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 300],
+      "webhookId": "visual-generate"
+    },
+    {
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "// TODO: queue a ComfyUI workflow via POST http://comfyui:8188/prompt\n// Then poll /history/<prompt_id> until done, fetch image bytes from /view,\n// write to ./comfyui/output/<uuid>.png and INSERT INTO mockups (...).\nreturn [{ json: { ok: false, todo: 'AI Visual Studio not implemented in v1' } }];"
+      },
+      "id": "wf02-todo",
+      "name": "TODO",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}"
+      },
+      "id": "wf02-respond",
+      "name": "Respond",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [680, 300]
+    }
+  ],
+  "connections": {
+    "Webhook": { "main": [[{ "node": "TODO", "type": "main", "index": 0 }]] },
+    "TODO": { "main": [[{ "node": "Respond", "type": "main", "index": 0 }]] }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "ai" }, { "name": "stub" }],
+  "meta": { "description": "Stub. Implement: POST {prompt, listing_id} → ComfyUI /prompt → poll /history → save PNG → INSERT mockups." }
+}

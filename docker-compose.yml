@@ -1,0 +1,155 @@
+name: etsy-ai
+
+# =============================================================================
+# Etsy AI Self-Hosted Dashboard
+#
+# Services:
+#   postgres  – shared DB for n8n, tooljet, etsy_app
+#   n8n       – workflow engine (UI + webhooks)
+#   tooljet   – low-code dashboard
+#   ollama    – local LLM server (text)
+#   comfyui   – local image-gen server (Flux / SDXL)
+#   caddy     – optional reverse proxy (profile: proxy)
+#
+# GPU access uses the Compose v2 device-reservation block. Requires the
+# NVIDIA Container Toolkit on the host (see README).
+# =============================================================================
+
+x-restart: &restart
+  restart: unless-stopped
+
+x-gpu: &gpu
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: all
+            capabilities: [gpu]
+
+services:
+  postgres:
+    image: postgres:16
+    <<: *restart
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks: [etsy_net]
+
+  n8n:
+    image: n8nio/n8n:latest
+    <<: *restart
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DB_TYPE: postgresdb
+      DB_POSTGRESDB_HOST: postgres
+      DB_POSTGRESDB_PORT: 5432
+      DB_POSTGRESDB_DATABASE: n8n
+      DB_POSTGRESDB_USER: ${POSTGRES_USER}
+      DB_POSTGRESDB_PASSWORD: ${POSTGRES_PASSWORD}
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}
+      N8N_BASIC_AUTH_ACTIVE: ${N8N_BASIC_AUTH_ACTIVE}
+      N8N_BASIC_AUTH_USER: ${N8N_BASIC_AUTH_USER}
+      N8N_BASIC_AUTH_PASSWORD: ${N8N_BASIC_AUTH_PASSWORD}
+      N8N_HOST: ${N8N_HOST}
+      N8N_PORT: ${N8N_PORT}
+      N8N_PROTOCOL: ${N8N_PROTOCOL}
+      WEBHOOK_URL: ${WEBHOOK_URL}
+      GENERIC_TIMEZONE: ${GENERIC_TIMEZONE}
+      # Allow workflows to reach sibling services by name
+      N8N_DEFAULT_BINARY_DATA_MODE: filesystem
+    volumes:
+      - n8n_data:/home/node/.n8n
+      - ./workflows:/workflows:ro
+    ports:
+      - "${N8N_PORT}:5678"
+    networks: [etsy_net]
+
+  tooljet:
+    image: tooljet/tooljet-ce:latest
+    <<: *restart
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      TOOLJET_HOST: ${TOOLJET_HOST}
+      LOCKBOX_MASTER_KEY: ${TOOLJET_LOCKBOX_KEY}
+      SECRET_KEY_BASE: ${TOOLJET_SECRET_KEY_BASE}
+      PG_HOST: postgres
+      PG_PORT: 5432
+      PG_USER: ${POSTGRES_USER}
+      PG_PASS: ${POSTGRES_PASSWORD}
+      PG_DB: tooljet
+      PG_DB_OWNER: "true"
+      DEPLOYMENT_PLATFORM: docker
+      ENABLE_TOOLJET_DB: "false"
+    volumes:
+      - tooljet_data:/var/lib/tooljet
+    ports:
+      - "${TOOLJET_PORT}:80"
+    networks: [etsy_net]
+
+  ollama:
+    image: ollama/ollama:latest
+    <<: [*restart, *gpu]
+    volumes:
+      - ollama_data:/root/.ollama
+    ports:
+      - "11434:11434"
+    networks: [etsy_net]
+
+  comfyui:
+    # Community image, GPU-enabled. Pin the digest in production.
+    image: yanwk/comfyui-boot:cu124-slim
+    <<: [*restart, *gpu]
+    volumes:
+      - ./comfyui/models:/root/ComfyUI/models
+      - ./comfyui/output:/root/ComfyUI/output
+      - ./comfyui/input:/root/ComfyUI/input
+    # ComfyUI's API has no authentication. Keep it on the internal network and
+    # only expose the port for local debugging. Remove this `ports:` block in
+    # production and proxy through n8n.
+    ports:
+      - "127.0.0.1:${COMFYUI_PORT}:8188"
+    networks: [etsy_net]
+
+  caddy:
+    image: caddy:2
+    <<: *restart
+    profiles: ["proxy"]
+    environment:
+      PUBLIC_DOMAIN: ${PUBLIC_DOMAIN}
+      LETSENCRYPT_EMAIL: ${LETSENCRYPT_EMAIL}
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    ports:
+      - "80:80"
+      - "443:443"
+    networks: [etsy_net]
+
+networks:
+  etsy_net:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  n8n_data:
+  tooljet_data:
+  ollama_data:
+  caddy_data:
+  caddy_config:

@@ -1,0 +1,49 @@
+{
+  "name": "05 - Etsy Listing Publish (stub)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "etsy-listing-publish",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "wf05-webhook",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 300],
+      "webhookId": "etsy-listing-publish"
+    },
+    {
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "// TODO: read listing+shop from Postgres, refresh token if expired, then\n// POST https://openapi.etsy.com/v3/application/shops/{shop_id}/listings\n// with title, description, tags, price, quantity. On success, store etsy_listing_id.\nreturn [{ json: { ok: false, todo: 'Etsy publish not implemented in v1', body: $input.first().json.body } }];"
+      },
+      "id": "wf05-todo",
+      "name": "TODO",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}"
+      },
+      "id": "wf05-respond",
+      "name": "Respond",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [680, 300]
+    }
+  ],
+  "connections": {
+    "Webhook": { "main": [[{ "node": "TODO", "type": "main", "index": 0 }]] },
+    "TODO": { "main": [[{ "node": "Respond", "type": "main", "index": 0 }]] }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "etsy" }, { "name": "stub" }],
+  "meta": { "description": "Stub. Implement: take listing_id → publish via Etsy v3 API → update etsy_listing_id + status='published'." }
+}
