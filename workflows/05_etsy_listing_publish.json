@@ -1,5 +1,5 @@
 {
-  "name": "05 - Etsy Listing Publish (stub)",
+  "name": "05 - Etsy Listing Publish",
   "nodes": [
     {
       "parameters": {
@@ -17,33 +17,137 @@
     },
     {
       "parameters": {
-        "language": "javaScript",
-        "jsCode": "// TODO: read listing+shop from Postgres, refresh token if expired, then\n// POST https://openapi.etsy.com/v3/application/shops/{shop_id}/listings\n// with title, description, tags, price, quantity. On success, store etsy_listing_id.\nreturn [{ json: { ok: false, todo: 'Etsy publish not implemented in v1', body: $input.first().json.body } }];"
+        "operation": "executeQuery",
+        "query": "SELECT l.id AS listing_id, l.title, l.description, l.tags, l.price, l.status AS local_status, p.kind, s.id AS shop_pk, s.etsy_shop_id, s.oauth_token, s.refresh_token, s.token_expires FROM listings l JOIN products p ON p.id = l.product_id JOIN shops s ON s.id = p.shop_id WHERE l.id = $1;",
+        "options": {
+          "queryReplacement": "={{ ($json.body || $json).listing_id }}"
+        }
       },
-      "id": "wf05-todo",
-      "name": "TODO",
+      "id": "wf05-pg-fetch",
+      "name": "Fetch Listing+Shop",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [460, 300],
+      "credentials": {
+        "postgres": {
+          "id": "pg-etsy-app",
+          "name": "Postgres etsy_app"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "// Always emit {access_token, refresh_token, token_expires}. Refresh from\n// Etsy when the token expires within 60s; otherwise pass through unchanged.\nconst row = $input.first().json;\nif (!row || !row.listing_id) throw new Error('Listing not found');\nif (!row.etsy_shop_id || !row.oauth_token) {\n  throw new Error(`Shop ${row.shop_pk} is not connected to Etsy. Run /webhook/etsy-connect first.`);\n}\n\nconst expiresAtMs = row.token_expires ? new Date(row.token_expires).getTime() : 0;\nconst needsRefresh = expiresAtMs - Date.now() < 60_000;\n\nif (!needsRefresh) {\n  return [{ json: {\n    ...row,\n    access_token:  row.oauth_token,\n    refresh_token: row.refresh_token,\n    token_expires: row.token_expires,\n    refreshed: false\n  } }];\n}\n\nconst params = new URLSearchParams({\n  grant_type:    'refresh_token',\n  client_id:     process.env.ETSY_CLIENT_ID,\n  refresh_token: row.refresh_token\n}).toString();\n\nconst tok = await this.helpers.httpRequest({\n  method: 'POST',\n  url: 'https://api.etsy.com/v3/public/oauth/token',\n  headers: { 'Content-Type': 'application/x-www-form-urlencoded' },\n  body: params,\n  json: true,\n  timeout: 30000\n});\nif (!tok.access_token) throw new Error(`Token refresh failed: ${JSON.stringify(tok)}`);\n\nreturn [{ json: {\n  ...row,\n  access_token:  tok.access_token,\n  refresh_token: tok.refresh_token,\n  token_expires: new Date(Date.now() + (tok.expires_in - 60) * 1000).toISOString(),\n  refreshed: true\n} }];"
+      },
+      "id": "wf05-refresh",
+      "name": "Refresh If Needed",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [460, 300]
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE shops SET oauth_token = $1, refresh_token = $2, token_expires = $3 WHERE id = $4 RETURNING id;",
+        "options": {
+          "queryReplacement": "={{ $json.access_token }},={{ $json.refresh_token }},={{ $json.token_expires }},={{ $json.shop_pk }}"
+        }
+      },
+      "id": "wf05-pg-token",
+      "name": "Persist Token",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [900, 300],
+      "credentials": {
+        "postgres": {
+          "id": "pg-etsy-app",
+          "name": "Postgres etsy_app"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "// Build the Etsy createDraftListing payload. Defaults are conservative:\n// listings are created in 'draft' state for review; for printables they're\n// digital/instant downloads; for POD they're physical with quantity=999.\nconst row = $('Refresh If Needed').first().json;\nconst tags = Array.isArray(row.tags) ? row.tags.slice(0, 13) : [];\nconst isDigital = row.kind === 'printable';\n\nconst payload = {\n  quantity:         isDigital ? 999 : 1,\n  title:            row.title,\n  description:      row.description,\n  price:            Number(row.price),\n  who_made:         'i_did',\n  when_made:        'made_to_order',\n  taxonomy_id:      6884,\n  type:             isDigital ? 'download'  : 'physical',\n  state:            'draft',\n  is_personalizable: false,\n  shipping_profile_id: null,\n  return_policy_id:  null,\n  tags\n};\n\nreturn [{ json: { etsy_shop_id: row.etsy_shop_id, access_token: row.access_token, listing_id: row.listing_id, payload } }];"
+      },
+      "id": "wf05-build",
+      "name": "Build Etsy Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1120, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://openapi.etsy.com/v3/application/shops/{{ $json.etsy_shop_id }}/listings",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Bearer {{ $json.access_token }}" },
+            { "name": "x-api-key",     "value": "={{ $env.ETSY_CLIENT_ID }}" },
+            { "name": "Content-Type",  "value": "application/x-www-form-urlencoded" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "string",
+        "body": "={{ Object.entries($json.payload).filter(([,v]) => v !== null && v !== undefined).flatMap(([k,v]) => Array.isArray(v) ? v.map(x => `${k}=${encodeURIComponent(x)}`) : [`${k}=${encodeURIComponent(v)}`]).join('&') }}",
+        "options": { "timeout": 60000 }
+      },
+      "id": "wf05-create",
+      "name": "Create Listing",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1340, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE listings SET etsy_listing_id = $1, status = 'published', updated_at = now() WHERE id = $2 RETURNING id, etsy_listing_id, status;",
+        "options": {
+          "queryReplacement": "={{ String($json.listing_id) }},={{ $('Build Etsy Payload').item.json.listing_id }}"
+        }
+      },
+      "id": "wf05-pg-update",
+      "name": "Mark Published",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1560, 300],
+      "credentials": {
+        "postgres": {
+          "id": "pg-etsy-app",
+          "name": "Postgres etsy_app"
+        }
+      }
     },
     {
       "parameters": {
         "respondWith": "json",
-        "responseBody": "={{ $json }}"
+        "responseBody": "={{ { ok: true, listing: $json } }}"
       },
       "id": "wf05-respond",
       "name": "Respond",
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1,
-      "position": [680, 300]
+      "position": [1780, 300]
     }
   ],
   "connections": {
-    "Webhook": { "main": [[{ "node": "TODO", "type": "main", "index": 0 }]] },
-    "TODO": { "main": [[{ "node": "Respond", "type": "main", "index": 0 }]] }
+    "Webhook":             { "main": [[{ "node": "Fetch Listing+Shop",     "type": "main", "index": 0 }]] },
+    "Fetch Listing+Shop":  { "main": [[{ "node": "Refresh If Needed", "type": "main", "index": 0 }]] },
+    "Refresh If Needed":   { "main": [[{ "node": "Persist Token",     "type": "main", "index": 0 }]] },
+    "Persist Token":       { "main": [[{ "node": "Build Etsy Payload","type": "main", "index": 0 }]] },
+    "Build Etsy Payload":  { "main": [[{ "node": "Create Listing",          "type": "main", "index": 0 }]] },
+    "Create Listing":      { "main": [[{ "node": "Mark Published",          "type": "main", "index": 0 }]] },
+    "Mark Published":      { "main": [[{ "node": "Respond",                 "type": "main", "index": 0 }]] }
   },
   "active": false,
-  "settings": { "executionOrder": "v1" },
-  "tags": [{ "name": "etsy" }, { "name": "stub" }],
-  "meta": { "description": "Stub. Implement: take listing_id → publish via Etsy v3 API → update etsy_listing_id + status='published'." }
+  "settings": {
+    "executionOrder": "v1",
+    "saveExecutionProgress": true,
+    "saveManualExecutions": true,
+    "saveDataErrorExecution": "all"
+  },
+  "tags": [{ "name": "etsy" }, { "name": "publish" }],
+  "meta": { "description": "POST /webhook/etsy-listing-publish {listing_id} → fetch listing+shop, refresh token if within 60s of expiry (writing back to shops), POST createDraftListing to Etsy v3, mark local listing published with the returned etsy_listing_id. Listings land in Etsy in 'draft' state for human review before going live; flip 'state' to 'active' once you trust outputs." }
 }
