@@ -6,6 +6,7 @@
         "httpMethod": "POST",
         "path": "listing-generate",
         "responseMode": "responseNode",
+        "authentication": "headerAuth",
         "options": {}
       },
       "id": "wf01-webhook",
@@ -13,7 +14,13 @@
       "type": "n8n-nodes-base.webhook",
       "typeVersion": 2,
       "position": [240, 300],
-      "webhookId": "listing-generate"
+      "webhookId": "listing-generate",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "n8n-webhook-secret",
+          "name": "n8n Webhook Secret"
+        }
+      }
     },
     {
       "parameters": {

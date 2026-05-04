@@ -6,6 +6,7 @@
         "httpMethod": "POST",
         "path": "ads-generate",
         "responseMode": "responseNode",
+        "authentication": "headerAuth",
         "options": {}
       },
       "id": "wf03-webhook",
@@ -13,7 +14,13 @@
       "type": "n8n-nodes-base.webhook",
       "typeVersion": 2,
       "position": [240, 300],
-      "webhookId": "ads-generate"
+      "webhookId": "ads-generate",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "n8n-webhook-secret",
+          "name": "n8n Webhook Secret"
+        }
+      }
     },
     {
       "parameters": {
@@ -64,7 +71,7 @@
     {
       "parameters": {
         "language": "javaScript",
-        "jsCode": "// Parse + validate + optionally call workflow 02 for a shared visual.\nconst ollama = $input.first().json;\nconst input = $('Build Prompt').first().json;\n\nlet parsed;\ntry {\n  parsed = typeof ollama.response === 'string' ? JSON.parse(ollama.response) : ollama.response;\n} catch (e) {\n  throw new Error(`LLM returned non-JSON: ${e.message}`);\n}\n\nconst channelToCopy = (channel) => {\n  const c = parsed[channel];\n  if (!c) throw new Error(`Missing copy for channel ${channel}`);\n  if (channel === 'pinterest') {\n    if (!c.title || c.title.length > 100) throw new Error('Pinterest title invalid');\n    if (!c.description || c.description.length > 500) throw new Error('Pinterest description invalid');\n    const hashtags = Array.isArray(c.hashtags) ? c.hashtags : [];\n    return `${c.title}\\n\\n${c.description}\\n\\n${hashtags.map(h => h.startsWith('#') ? h : '#' + h).join(' ')}`;\n  }\n  if (channel === 'x') {\n    if (!c.post || c.post.length > 280) throw new Error('X post invalid');\n    return c.post;\n  }\n  if (channel === 'instagram') {\n    if (!c.caption || c.caption.length > 2200) throw new Error('Instagram caption invalid');\n    const hashtags = Array.isArray(c.hashtags) ? c.hashtags : [];\n    return `${c.caption}\\n\\n${hashtags.map(h => h.startsWith('#') ? h : '#' + h).join(' ')}`;\n  }\n  return JSON.stringify(c);\n};\n\nlet imagePath = null;\nif (input.generate_visual) {\n  try {\n    const visual = await this.helpers.httpRequest({\n      method: 'POST',\n      url: 'http://localhost:5678/webhook/visual-generate',\n      body: { listing_id: input.listing_id, width: 1080, height: 1080 },\n      json: true,\n      timeout: 360000\n    });\n    imagePath = visual?.mockup?.file_path || null;\n  } catch (e) {\n    // Soft-fail: ad copy still goes out, just without a generated visual.\n    console.warn(`visual-generate failed: ${e.message}`);\n  }\n}\n\nconst scheduledFor = input.schedule_at\n  ? new Date(input.schedule_at).toISOString()\n  : new Date(Date.now() + 60 * 60 * 1000).toISOString();\n\n// Emit one item per channel so the Postgres node inserts each row independently.\nreturn input.channels.map(channel => ({\n  json: {\n    listing_id: input.listing_id,\n    channel,\n    copy: channelToCopy(channel),\n    image_path: imagePath,\n    scheduled_for: scheduledFor,\n    raw: parsed[channel] || null\n  }\n}));"
+        "jsCode": "// Parse + validate + optionally call workflow 02 for a shared visual.\nconst ollama = $input.first().json;\nconst input = $('Build Prompt').first().json;\n\nlet parsed;\ntry {\n  parsed = typeof ollama.response === 'string' ? JSON.parse(ollama.response) : ollama.response;\n} catch (e) {\n  throw new Error(`LLM returned non-JSON: ${e.message}`);\n}\n\nconst channelToCopy = (channel) => {\n  const c = parsed[channel];\n  if (!c) throw new Error(`Missing copy for channel ${channel}`);\n  if (channel === 'pinterest') {\n    if (!c.title || c.title.length > 100) throw new Error('Pinterest title invalid');\n    if (!c.description || c.description.length > 500) throw new Error('Pinterest description invalid');\n    const hashtags = Array.isArray(c.hashtags) ? c.hashtags : [];\n    return `${c.title}\\n\\n${c.description}\\n\\n${hashtags.map(h => h.startsWith('#') ? h : '#' + h).join(' ')}`;\n  }\n  if (channel === 'x') {\n    if (!c.post || c.post.length > 280) throw new Error('X post invalid');\n    return c.post;\n  }\n  if (channel === 'instagram') {\n    if (!c.caption || c.caption.length > 2200) throw new Error('Instagram caption invalid');\n    const hashtags = Array.isArray(c.hashtags) ? c.hashtags : [];\n    return `${c.caption}\\n\\n${hashtags.map(h => h.startsWith('#') ? h : '#' + h).join(' ')}`;\n  }\n  return JSON.stringify(c);\n};\n\nlet imagePath = null;\nif (input.generate_visual) {\n  try {\n    const visual = await this.helpers.httpRequest({\n      method: 'POST',\n      url: 'http://localhost:5678/webhook/visual-generate',\n      headers: { 'X-Webhook-Secret': process.env.N8N_WEBHOOK_SECRET },\n      body: { listing_id: input.listing_id, width: 1080, height: 1080 },\n      json: true,\n      timeout: 360000\n    });\n    imagePath = visual?.mockup?.file_path || null;\n  } catch (e) {\n    // Soft-fail: ad copy still goes out, just without a generated visual.\n    console.warn(`visual-generate failed: ${e.message}`);\n  }\n}\n\nconst scheduledFor = input.schedule_at\n  ? new Date(input.schedule_at).toISOString()\n  : new Date(Date.now() + 60 * 60 * 1000).toISOString();\n\n// Emit one item per channel so the Postgres node inserts each row independently.\nreturn input.channels.map(channel => ({\n  json: {\n    listing_id: input.listing_id,\n    channel,\n    copy: channelToCopy(channel),\n    image_path: imagePath,\n    scheduled_for: scheduledFor,\n    raw: parsed[channel] || null\n  }\n}));"
       },
       "id": "wf03-validate",
       "name": "Validate + Visual",

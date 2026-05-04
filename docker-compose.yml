@@ -80,6 +80,7 @@ services:
       PINTEREST_WEBHOOK_URL: ${PINTEREST_WEBHOOK_URL}
       X_WEBHOOK_URL: ${X_WEBHOOK_URL}
       INSTAGRAM_WEBHOOK_URL: ${INSTAGRAM_WEBHOOK_URL}
+      N8N_WEBHOOK_SECRET: ${N8N_WEBHOOK_SECRET}
     volumes:
       - n8n_data:/home/node/.n8n
       - ./workflows:/workflows:ro
