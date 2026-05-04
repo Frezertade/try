@@ -6,6 +6,7 @@
         "httpMethod": "POST",
         "path": "pod-route",
         "responseMode": "responseNode",
+        "authentication": "headerAuth",
         "options": {}
       },
       "id": "wf07-webhook",
@@ -13,7 +14,13 @@
       "type": "n8n-nodes-base.webhook",
       "typeVersion": 2,
       "position": [240, 300],
-      "webhookId": "pod-route"
+      "webhookId": "pod-route",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "n8n-webhook-secret",
+          "name": "n8n Webhook Secret"
+        }
+      }
     },
     {
       "parameters": {

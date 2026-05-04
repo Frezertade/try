@@ -14,6 +14,12 @@
       "_note": "Override per-environment. Use the Docker service name when ToolJet calls n8n inside the compose network."
     },
     {
+      "name": "N8N_WEBHOOK_SECRET",
+      "value": "set_to_match_n8n_env",
+      "scope": "global",
+      "_note": "Must match the N8N_WEBHOOK_SECRET env var in the n8n container. Sent as X-Webhook-Secret on every n8n_api call."
+    },
+    {
       "name": "DEFAULT_SHOP_ID",
       "value": "1",
       "scope": "global"
@@ -37,7 +43,10 @@
       "kind": "restapi",
       "options": {
         "base_url": "{{constants.N8N_URL}}",
-        "headers": [{ "key": "Content-Type", "value": "application/json" }]
+        "headers": [
+          { "key": "Content-Type",    "value": "application/json" },
+          { "key": "X-Webhook-Secret", "value": "{{constants.N8N_WEBHOOK_SECRET}}" }
+        ]
       }
     }
   ],
@@ -200,6 +209,19 @@
       "run_on_page_load": false
     },
     {
+      "name": "start_etsy_connect",
+      "data_source": "n8n_api",
+      "kind": "restapi",
+      "options": {
+        "method": "get",
+        "url_path": "/webhook/etsy-connect",
+        "url_params": [
+          { "key": "shop_name", "value": "{{components.newShopName.value || 'My Shop'}}" }
+        ]
+      },
+      "run_on_page_load": false
+    },
+    {
       "name": "save_shop_pod_config",
       "data_source": "etsy_app_db",
       "kind": "postgresql",
@@ -325,10 +347,11 @@
         { "id": "newShopName", "type": "TextInput", "props": { "label": "Shop label (free text)", "placeholder": "My Test Shop" } },
         {
           "id": "connectShopBtn", "type": "Button",
-          "props": { "text": "Authorise on Etsy" },
+          "props": { "text": "Authorise on Etsy", "loading_state": "{{queries.start_etsy_connect.isLoading}}" },
           "events": [
-            { "event": "onClick", "action": "open-url",
-              "url": "{{constants.N8N_URL}}/webhook/etsy-connect?shop_name={{encodeURIComponent(components.newShopName.value || 'My Shop')}}",
+            { "event": "onClick", "action": "run-query", "query": "start_etsy_connect" },
+            { "event": "onSuccess", "action": "open-url",
+              "url": "{{queries.start_etsy_connect.data?.auth_url}}",
               "open_in_new_tab": true }
           ]
         },

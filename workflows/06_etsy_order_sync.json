@@ -85,6 +85,12 @@
       "parameters": {
         "method": "POST",
         "url": "http://localhost:5678/webhook/pod-route",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "X-Webhook-Secret", "value": "={{ $env.N8N_WEBHOOK_SECRET }}" }
+          ]
+        },
         "sendBody": true,
         "specifyBody": "json",
         "jsonBody": "={ \"order_id\": {{ $json.id }} }",

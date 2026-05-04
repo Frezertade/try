@@ -6,6 +6,7 @@
         "httpMethod": "GET",
         "path": "etsy-connect",
         "responseMode": "responseNode",
+        "authentication": "headerAuth",
         "options": {}
       },
       "id": "wf04a-webhook",
@@ -13,7 +14,13 @@
       "type": "n8n-nodes-base.webhook",
       "typeVersion": 2,
       "position": [240, 300],
-      "webhookId": "etsy-connect"
+      "webhookId": "etsy-connect",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "n8n-webhook-secret",
+          "name": "n8n Webhook Secret"
+        }
+      }
     },
     {
       "parameters": {
@@ -48,13 +55,8 @@
     },
     {
       "parameters": {
-        "respondWith": "text",
-        "responseBody": "=<!doctype html><meta charset=\"utf-8\"><title>Connect Etsy shop</title><style>body{font-family:system-ui;max-width:540px;margin:80px auto;padding:0 16px}a.btn{display:inline-block;padding:12px 24px;background:#f56400;color:#fff;text-decoration:none;border-radius:6px;font-weight:600}small{color:#666}</style><h1>Connect <em>{{ $('Generate PKCE').item.json.shop_name }}</em></h1><p>Click below to authorise n8n on Etsy. You'll be redirected back here when it's done.</p><p><a class=\"btn\" href=\"{{ $('Generate PKCE').item.json.auth_url }}\">Authorise on Etsy →</a></p><p><small>State token: <code>{{ $('Generate PKCE').item.json.state }}</code> (valid 10 min)</small></p>",
-        "options": {
-          "responseHeaders": {
-            "entries": [{ "name": "Content-Type", "value": "text/html; charset=utf-8" }]
-          }
-        }
+        "respondWith": "json",
+        "responseBody": "={{ { ok: true, shop_name: $('Generate PKCE').item.json.shop_name, state: $('Generate PKCE').item.json.state, auth_url: $('Generate PKCE').item.json.auth_url } }}"
       },
       "id": "wf04a-respond",
       "name": "Respond",

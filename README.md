@@ -397,6 +397,28 @@ ngrok http 5678   # n8n webhooks (use this URL as ETSY_REDIRECT_URI)
 
 ## Security best practices
 
+### Webhook auth
+
+Workflows 01, 02, 03, 04a, 05, 07 require `X-Webhook-Secret: <N8N_WEBHOOK_SECRET>` on every call. Without it n8n returns **401**. Public exemptions: workflow 04 (Etsy OAuth callback — Etsy can't send a custom header) and workflow 02b (mockup-view image proxy — used by `<img src="…">`).
+
+One-time setup after first boot:
+1. Set `N8N_WEBHOOK_SECRET` in `.env` (`openssl rand -hex 32`); `docker compose restart n8n`.
+2. In the n8n UI: **Credentials → New → Header Auth**.
+   - Name: `n8n Webhook Secret` (must match the JSON in workflow imports).
+   - Header name: `X-Webhook-Secret`.
+   - Header value: paste the same secret.
+3. In the ToolJet UI: **Workspace constants → N8N_WEBHOOK_SECRET → set the same value.**
+
+Direct curl now needs the header:
+```bash
+curl -X POST http://localhost:5678/webhook/listing-generate \
+  -H "x-webhook-secret: $N8N_WEBHOOK_SECRET" \
+  -H 'content-type: application/json' \
+  -d '{"shop_id":1,"niche":"vintage botanical printables","kind":"printable","cost":0}'
+```
+
+### Other practices
+
 - Never commit `.env`. `.gitignore` excludes it.
 - `N8N_ENCRYPTION_KEY` encrypts every credential stored in n8n. **Rotating it
   invalidates all stored credentials** — only rotate on a fresh install.
@@ -408,6 +430,9 @@ ngrok http 5678   # n8n webhooks (use this URL as ETSY_REDIRECT_URI)
   superuser for simplicity.
 - Rotate Etsy / Printify / Printful tokens periodically and revoke them in the
   provider UIs when removing a shop.
+- `shops.oauth_token` / `refresh_token` are stored in plaintext today.
+  Encrypting at rest with `pgcrypto` is a recommended follow-on; for now,
+  restrict Postgres access to the n8n container's network.
 
 ---
 

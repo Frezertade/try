@@ -6,6 +6,7 @@
         "httpMethod": "POST",
         "path": "etsy-listing-publish",
         "responseMode": "responseNode",
+        "authentication": "headerAuth",
         "options": {}
       },
       "id": "wf05-webhook",
@@ -13,7 +14,13 @@
       "type": "n8n-nodes-base.webhook",
       "typeVersion": 2,
       "position": [240, 300],
-      "webhookId": "etsy-listing-publish"
+      "webhookId": "etsy-listing-publish",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "n8n-webhook-secret",
+          "name": "n8n Webhook Secret"
+        }
+      }
     },
     {
       "parameters": {
