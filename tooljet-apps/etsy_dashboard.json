@@ -15,9 +15,9 @@
     },
     {
       "name": "N8N_WEBHOOK_SECRET",
-      "value": "set_to_match_n8n_env",
+      "value": "",
       "scope": "global",
-      "_note": "Must match the N8N_WEBHOOK_SECRET env var in the n8n container. Sent as X-Webhook-Secret on every n8n_api call."
+      "_note": "Operator MUST set this in the ToolJet UI to match the N8N_WEBHOOK_SECRET env var on the n8n container. Sent as X-Webhook-Secret on every n8n_api call."
     },
     {
       "name": "DEFAULT_SHOP_ID",
